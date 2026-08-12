@@ -509,7 +509,26 @@ static int TranslateWord2(Translator *tr, char *word, WORD_TAB *wtab, int wtab_r
 				if (new_language[0] == 0)
 					new_language = ESPEAKNG_DEFAULT_VOICE;
 
-				switch_phonemes = SetTranslator2(new_language);
+				// Persian (fa): English fallback with American accent.
+				// Use translator "en" (correct English langopts + en_dict +
+				// acronym/unpronounceable handling) then switch phoneme table
+				// to en-us and enable General American dictrules 3 and 6.
+				if (translator != NULL && translator->translator_name == L('f', 'a') &&
+				    (strcmp(new_language, "en") == 0 || strcmp(new_language, "EN") == 0)) {
+					switch_phonemes = SetTranslator2("en");
+					if (switch_phonemes >= 0 && translator2 != NULL) {
+						translator2->dict_condition |= (1 << 3) | (1 << 6);
+						{
+							int us_tab = SelectPhonemeTableName("en-us");
+							if (us_tab >= 0) {
+								switch_phonemes = us_tab;
+								translator2->phoneme_tab_ix = us_tab;
+							}
+						}
+					}
+				} else {
+					switch_phonemes = SetTranslator2(new_language);
+				}
 
 				if (switch_phonemes >= 0) {
 					// re-translate the word using the new translator
