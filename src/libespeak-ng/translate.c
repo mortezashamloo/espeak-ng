@@ -380,21 +380,11 @@ int SetTranslator2(const char *new_language)
 
 int SetTranslator3(const char *new_language)
 {
-	// Persian (fa): same American-accent fallback as SetTranslator2, but for
-	// the translator used to announce capital letters and symbol/emoji names.
-	if (translator != NULL && translator->translator_name == L('f', 'a') &&
-	    (strcmp(new_language, "en") == 0 || strcmp(new_language, "EN") == 0)) {
-		int result = SetAlternateTranslator("en", &translator3, translator3_language);
-		if (result >= 0 && translator3 != NULL) {
-			translator3->dict_condition |= (1 << 3) | (1 << 6);
-			int us_tab = SelectPhonemeTableName("en-us");
-			if (us_tab >= 0) {
-				result = us_tab;
-				translator3->phoneme_tab_ix = us_tab;
-			}
-		}
-		return result;
-	}
+	// Used for announcing capital letters and symbol/emoji names.
+	// Do NOT force en-us here: that broke the silent fallback when NVDA
+	// has emoji reading disabled (stock behaviour was silence; forced
+	// en-us produced gibberish). American accent for real English words
+	// inside Persian is handled only in SetTranslator2 / TranslateWord2.
 	return SetAlternateTranslator(new_language, &translator3, translator3_language);
 }
 
