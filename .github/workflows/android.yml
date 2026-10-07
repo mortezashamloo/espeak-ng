@@ -19,6 +19,8 @@ jobs:
           distribution: 'temurin'
           java-version: 17
           cache: gradle
+      - name: Apply Persian fixes
+        run: python3 apply-espeak-fix.py --no-emoji
       - name: make
         run: cd android && ./gradlew assembleDebug --no-daemon
       - name: upload
@@ -39,6 +41,8 @@ jobs:
           distribution: 'temurin'
           java-version: 17
           cache: gradle
+      - name: Apply Persian fixes
+        run: python3 apply-espeak-fix.py --no-emoji
       - name: make
         run: cd android && ./gradlew assembleRelease --no-daemon
       - name: upload
@@ -59,6 +63,8 @@ jobs:
           distribution: 'temurin'
           java-version: 17
           cache: gradle
+      - name: Apply Persian fixes
+        run: python3 apply-espeak-fix.py --no-emoji
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules

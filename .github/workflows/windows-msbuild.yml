@@ -33,6 +33,9 @@ jobs:
         with:
           repository: "espeak-ng/pcaudiolib"
           path: "src/pcaudiolib"
+      - name: Apply Persian fixes
+        shell: pwsh
+        run: python apply-espeak-fix.py --no-emoji
       - name: Do build
         working-directory: "src/windows"
         run: msbuild espeak-ng.sln /p:Configuration=${{ matrix.config }} /p:Platform=x64
