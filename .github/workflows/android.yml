@@ -23,6 +23,26 @@ jobs:
         run: python3 apply-espeak-fix.py --no-emoji
       - name: make
         run: cd android && ./gradlew assembleDebug --no-daemon
+      - name: Sign APK with the espeak key
+        env:
+          KEYSTORE_B64: ${{ secrets.ESPEAK_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ESPEAK_KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::warning::Signing secrets are not set, leaving the APK as built"
+            exit 0
+          fi
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/espeak.p12"
+          IN=android/build/outputs/apk/debug/espeak-debug.apk
+          OUT=android/build/outputs/apk/debug/espeak-debug.apk
+          "$BT/zipalign" -f -p 4 "$IN" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/espeak.p12" --ks-key-alias espeak --ks-pass env:KEYSTORE_PASSWORD --out "$RUNNER_TEMP/signed.apk" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/signed.apk"
+          rm -f "$IN"
+          mv -f "$RUNNER_TEMP/signed.apk" "$OUT"
+          rm -f "$RUNNER_TEMP/espeak.p12" "$RUNNER_TEMP/aligned.apk"
       - name: upload
         uses: actions/upload-artifact@v7
         with:
@@ -45,11 +65,31 @@ jobs:
         run: python3 apply-espeak-fix.py --no-emoji
       - name: make
         run: cd android && ./gradlew assembleRelease --no-daemon
+      - name: Sign APK with the espeak key
+        env:
+          KEYSTORE_B64: ${{ secrets.ESPEAK_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ESPEAK_KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::warning::Signing secrets are not set, leaving the APK as built"
+            exit 0
+          fi
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/espeak.p12"
+          IN=android/build/outputs/apk/release/espeak-release-unsigned.apk
+          OUT=android/build/outputs/apk/release/espeak-release.apk
+          "$BT/zipalign" -f -p 4 "$IN" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/espeak.p12" --ks-key-alias espeak --ks-pass env:KEYSTORE_PASSWORD --out "$RUNNER_TEMP/signed.apk" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/signed.apk"
+          rm -f "$IN"
+          mv -f "$RUNNER_TEMP/signed.apk" "$OUT"
+          rm -f "$RUNNER_TEMP/espeak.p12" "$RUNNER_TEMP/aligned.apk"
       - name: upload
         uses: actions/upload-artifact@v7
         with:
           name: android-release.apk
-          path: android/build/outputs/apk/release/espeak-release-unsigned.apk
+          path: android/build/outputs/apk/release/*.apk
           retention-days: 5
 
   test:
