@@ -16,6 +16,11 @@ fallback language is English, it:
   * turns on dictionary rule conditions 3 and 6 (the same ones voices/en-us uses: `dictrules 3 6`).
 Every other language keeps upstream behaviour.
 
+It ALSO makes the build read your own `dictsource/<lang>_extra` files (always on, e.g. `fa_extra`).
+The stock CMake data build (used by the Android build) copies only `_rules`, `_list`, `_listx` and
+`_emoji` into its temporary dictionary folder, so a `fa_extra` file was silently ignored.  This adds
+the missing copy (cmake/data.cmake).  Nothing changes when no `*_extra` file exists.
+
 With the option `--no-emoji` it ALSO makes Persian text SILENT for emoji.  Without that option emoji
 are read exactly as upstream does (so: remove `--no-emoji` from the workflow to get emoji read again).
 The `fa_emoji` dictionary file is NOT touched or emptied: in the clause tokenizer, when the voice is Persian, every
@@ -31,6 +36,7 @@ import sys
 from pathlib import Path
 
 TARGET = Path("src/libespeak-ng/translate.c")
+CMAKE_DATA = Path("cmake/data.cmake")
 MARKER = "Persian (fa): English fallback with American accent"
 EMOJI_MARKER = "Persian (fa): emoji are silent"
 
@@ -73,7 +79,43 @@ def fail(msg):
     sys.exit(1)
 
 
+def patch_extra_dictionary():
+    """cmake/data.cmake: also copy <lang>_extra into the temporary dictionary folder (like _emoji)."""
+    if not CMAKE_DATA.exists():
+        print("extra dictionaries: cmake/data.cmake not found -- skipped (this build system reads dictsource directly)")
+        return
+    text = CMAKE_DATA.read_bytes().decode("utf-8")
+    crlf = "\r\n" in text
+    if crlf:
+        text = text.replace("\r\n", "\n")
+    if "_extra" in text:
+        print("extra dictionaries: already patched")
+        return
+    pattern = re.compile(
+        r'(?P<ind>[ \t]*)if\(EXISTS "\$\{DICT_SRC_DIR\}/\$\{_dict_name\}_emoji"\)[ \t]*\n'
+        r'[^\n]*\n'
+        r'[ \t]*endif\(\)[ \t]*\n'
+    )
+    found = list(pattern.finditer(text))
+    if len(found) != 1:
+        fail("could not find the `_emoji` copy rule in cmake/data.cmake (found %d). This espeak-ng version "
+             "changed that file; the *_extra step needs a small update." % len(found))
+    m = found[0]
+    ind = m.group("ind")
+    block = (
+        ind + 'if(EXISTS "${DICT_SRC_DIR}/${_dict_name}_extra")\n'
+        + ind + '  list(APPEND _dict_deps "${DICT_SRC_DIR}/${_dict_name}_extra")\n'
+        + ind + 'endif()\n'
+    )
+    new_text = text[:m.end()] + block + text[m.end():]
+    if crlf:
+        new_text = new_text.replace("\n", "\r\n")
+    CMAKE_DATA.write_bytes(new_text.encode("utf-8"))
+    print("extra dictionaries: patched OK (<lang>_extra files are now compiled, e.g. fa_extra)")
+
+
 def main():
+    patch_extra_dictionary()
     if not TARGET.exists():
         fail("%s not found. Run this from the root of the espeak-ng source tree." % TARGET)
     text = TARGET.read_bytes().decode("utf-8")
