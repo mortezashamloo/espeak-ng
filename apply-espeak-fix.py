@@ -1,60 +1,33 @@
 #!/usr/bin/env python3
 """
-apply-espeak-fix.py -- gives Persian (fa) text an AMERICAN accent for embedded English words
-in espeak-ng, instead of the British one.
+apply-espeak-fix.py -- Persian (fa) with American accent for English words
++ emoji silent EXCEPT flags (🇮🇷 🇺🇸 🇪🇺 etc. which still play the flag tone).
 
-Run it from the root of an espeak-ng source tree (the folder that contains `src/`), before building:
-
-    python3 apply-espeak-fix.py
-
-It edits only src/libespeak-ng/translate.c, inside the word-translation code (the place where a word
-asks for the fallback language's translator).  When the current voice is Persian ("fa") and the
-fallback language is English, it:
-  * asks for the real "en" translator (so the English dictionary, abbreviations, acronym
-    handling and langopts stay exactly as upstream),
-  * switches that translator's phoneme table to "en-us",
-  * turns on dictionary rule conditions 3 and 6 (the same ones voices/en-us uses: `dictrules 3 6`).
-Every other language keeps upstream behaviour.
-
-It ALSO makes the build read your own `dictsource/<lang>_extra` files (always on, e.g. `fa_extra`).
-The stock CMake data build (used by the Android build) copies only `_rules`, `_list`, `_listx` and
-`_emoji` into its temporary dictionary folder, so a `fa_extra` file was silently ignored.  This adds
-the missing copy (cmake/data.cmake).  Nothing changes when no `*_extra` file exists.
-
-With the option `--no-emoji` it ALSO makes Persian text SILENT for emoji.  Without that option emoji
-are read exactly as upstream does (so: remove `--no-emoji` from the workflow to get emoji read again).
-The `fa_emoji` dictionary file is NOT touched or emptied: in the clause tokenizer, when the voice is Persian, every
-emoji character (faces, hearts, flags, skin tones, joiners, tag characters) is turned into a space
-before it can reach the dictionary, so nothing is said for it and the words around it stay separate.
-
-It is safe to run again (it says "already patched").  If a new espeak-ng version moved the code so
-that the spot can no longer be found, it stops with a clear message and a non-zero exit code, so a
-GitHub Actions build fails visibly instead of silently building without the fix.
+Run from root of espeak-ng source tree.
 """
 import re
 import sys
 from pathlib import Path
 
 TARGET = Path("src/libespeak-ng/translate.c")
-CMAKE_DATA = Path("cmake/data.cmake")
 MARKER = "Persian (fa): English fallback with American accent"
-EMOJI_MARKER = "Persian (fa): emoji are silent"
+FLAG_MARKER = "Persian (fa): flags only (other emojis silent)"
 
-EMOJI_BLOCK = """\
-{ind}// Persian (fa): emoji are silent. Turn every emoji character into a space before it can
-{ind}// reach the dictionary (fa_emoji stays untouched); other languages are unchanged.
+EMOJI_FLAG = """\
+// Persian (fa): emoji silent EXCEPT flags. Flags still use the tone (same as upstream).
 {ind}if (tr->translator_name == L('f', 'a') &&
 {ind}    (IsEmoji(c) || IsEmojiModifier(c) || IsEmojiTag(c) ||
-{ind}     (c == 0x200d && (IsEmoji(prev_out) || IsEmoji(next_in)))))
-{ind}\tc = ' ';
-
+{ind}     (c == 0x200d && (IsEmoji(prev_out) || IsEmoji(next_in))) ||
+{ind}     IsFlagEmoji(c))) {{
+{ind}\tif (!IsFlagEmoji(c)) {{
+{ind}\t\tc = ' ';
+{ind}\t}}
+{ind}}}
 """
 
 NEW_BLOCK = """\
 // Persian (fa): English fallback with American accent.
-{ind}// Use translator "en" (correct English langopts + en_dict +
-{ind}// acronym/unpronounceable handling) then switch phoneme table
-{ind}// to en-us and enable General American dictrules 3 and 6.
+{ind}// Use translator "en" then switch to en-us and enable dictrules 3 & 6.
 {ind}if (translator != NULL && translator->translator_name == L('f', 'a') &&
 {ind}    (strcmp(new_language, "en") == 0 || strcmp(new_language, "EN") == 0)) {{
 {ind}\tswitch_phonemes = SetTranslator2("en");
@@ -68,82 +41,46 @@ NEW_BLOCK = """\
 {ind}\t\t\t}}
 {ind}\t\t}}
 {ind}\t}}
+{ind}\t}}
 {ind}}} else {{
 {ind}\tswitch_phonemes = SetTranslator2(new_language);
 {ind}}}
 """
 
-
 def fail(msg):
     print("ERROR: " + msg)
     sys.exit(1)
 
-
-def patch_extra_dictionary():
-    """cmake/data.cmake: also copy <lang>_extra into the temporary dictionary folder (like _emoji)."""
-    if not CMAKE_DATA.exists():
-        print("extra dictionaries: cmake/data.cmake not found -- skipped (this build system reads dictsource directly)")
-        return
-    text = CMAKE_DATA.read_bytes().decode("utf-8")
-    crlf = "\r\n" in text
-    if crlf:
-        text = text.replace("\r\n", "\n")
-    if "_extra" in text:
-        print("extra dictionaries: already patched")
-        return
-    pattern = re.compile(
-        r'(?P<ind>[ \t]*)if\(EXISTS "\$\{DICT_SRC_DIR\}/\$\{_dict_name\}_emoji"\)[ \t]*\n'
-        r'[^\n]*\n'
-        r'[ \t]*endif\(\)[ \t]*\n'
-    )
-    found = list(pattern.finditer(text))
-    if len(found) != 1:
-        fail("could not find the `_emoji` copy rule in cmake/data.cmake (found %d). This espeak-ng version "
-             "changed that file; the *_extra step needs a small update." % len(found))
-    m = found[0]
-    ind = m.group("ind")
-    block = (
-        ind + 'if(EXISTS "${DICT_SRC_DIR}/${_dict_name}_extra")\n'
-        + ind + '  list(APPEND _dict_deps "${DICT_SRC_DIR}/${_dict_name}_extra")\n'
-        + ind + 'endif()\n'
-    )
-    new_text = text[:m.end()] + block + text[m.end():]
-    if crlf:
-        new_text = new_text.replace("\n", "\r\n")
-    CMAKE_DATA.write_bytes(new_text.encode("utf-8"))
-    print("extra dictionaries: patched OK (<lang>_extra files are now compiled, e.g. fa_extra)")
-
-
 def main():
-    patch_extra_dictionary()
     if not TARGET.exists():
-        fail("%s not found. Run this from the root of the espeak-ng source tree." % TARGET)
+        fail(f"{TARGET} not found. Run from root of espeak-ng source tree.")
+
     text = TARGET.read_bytes().decode("utf-8")
     crlf = "\r\n" in text
     if crlf:
         text = text.replace("\r\n", "\n")
 
-    silence_emoji = "--no-emoji" in sys.argv
-    if MARKER in text:
-        print("accent fix: already patched")
-        new_text = text
-    else:
-        new_text = apply_accent(text)
+    silence_emoji = "--flags-only" in sys.argv
     if silence_emoji:
-        if EMOJI_MARKER in new_text:
-            print("emoji silence: already patched")
+        if FLAG_MARKER in text:
+            print("emoji flags-only: already patched")
+            return
+        new_text = apply_flags_only(text)
+    else:
+        if MARKER in text:
+            print("accent fix: already patched")
+            new_text = text
         else:
-            new_text = apply_emoji(new_text)
+            new_text = apply_accent(text)
+
     if new_text == text:
         return
     if crlf:
         new_text = new_text.replace("\n", "\r\n")
     TARGET.write_bytes(new_text.encode("utf-8"))
-    print("translate.c written")
-
+    print("✅ translate.c patched successfully!")
 
 def apply_accent(text):
-
     # The one call in TranslateClause that hands the fallback language to SetTranslator2,
     # right after the default-voice fallback.  Whitespace-tolerant.
     pattern = re.compile(
@@ -170,27 +107,22 @@ def apply_accent(text):
     print("accent fix: patched OK (Persian text reads English words with the American accent)")
     return new_text
 
-
-def apply_emoji(text):
-    # In the clause tokenizer, right after the variation-selector skip (U+FE0E / U+FE0F).
-    pattern = re.compile(
-        r"(?P<ind>[ \t]*)if \(\(c == 0xfe0e\) \|\| \(c == 0xfe0f\)\)[ \t]*\n"
-        r"[ \t]*continue;[^\n]*\n(?:[ \t]*//[^\n]*\n)*"
-    )
+def apply_flags_only(text):
+    # اضافه کردن block جدید برای silent عادی ولی flag فعال
+    pattern = re.compile(r"(?P<ind>[ \t]*)if \(\(c == 0xfe0e\) \|\| \(c == 0xfe0f\)\)[ \t]*\n")
     found = list(pattern.finditer(text))
     if len(found) != 1:
-        fail("could not find the variation-selector skip (0xfe0e / 0xfe0f) in translate.c (found %d). "
+        fail("could not find variation-selector skip (0xfe0e / 0xfe0f) in translate.c (found %d). "
              "This espeak-ng version changed that code; the emoji step needs a small update. "
-             "(Run without --no-emoji to apply only the accent fix.)" % len(found))
-    for sym in ("IsEmoji", "IsEmojiModifier", "IsEmojiTag", "prev_out", "next_in"):
+             "(Run without --flags-only to apply only the accent fix.)" % len(found))
+    for sym in ("IsEmoji", "IsEmojiModifier", "IsEmojiTag", "prev_out", "next_in", "IsFlagEmoji"):
         if sym not in text:
-            fail("symbol `%s` not found in translate.c; the emoji step needs an update." % sym)
+            fail("symbol `%s` not found in translate.c; the flags-only step needs an update." % sym)
     m = found[0]
     ind = m.group("ind")
-    new_text = text[:m.end()] + "\n" + EMOJI_BLOCK.format(ind=ind).rstrip("\n") + "\n" + text[m.end():]
-    print("emoji silence: patched OK (Persian text says nothing for emoji; fa_emoji untouched)")
+    new_text = text[:m.end()] + "\n" + EMOJI_FLAG.format(ind=ind) + "\n" + text[m.end():]
+    print("emoji flags-only: patched OK (flags still play tone, others silent)")
     return new_text
-
 
 if __name__ == "__main__":
     main()
