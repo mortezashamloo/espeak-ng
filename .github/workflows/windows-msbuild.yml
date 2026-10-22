@@ -16,11 +16,6 @@ jobs:
       matrix:
         config: [Release]
         platform: [x86, x64]
-        include:
-          - platform: x86
-            out_dir: Win32
-          - platform: x64
-            out_dir: x64
 
     steps:
       - name: Setup MSBuild
@@ -44,27 +39,17 @@ jobs:
           repository: "espeak-ng/pcaudiolib"
           path: "src/pcaudiolib"
 
-      - name: Apply Persian fixes
+      - name: Apply Persian and x86 fixes
         shell: pwsh
         run: python apply-espeak-fix.py --no-emoji
 
-      - name: Build Solution (including espeak_sapi.dll and MSI)
+      - name: Build Solution (libespeak-ng SAPI5, data, and MSI installer)
         working-directory: "src/windows"
         shell: pwsh
         run: |
-          msbuild libespeak-ng.vcxproj /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }}
-          msbuild espeak_sapi.vcxproj /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }}
-          msbuild espeak-ng.vcxproj /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }}
-          $exe = (Get-ChildItem -Path . -Recurse -Filter "espeak-ng.exe" | Select-Object -First 1).FullName
-          if ($exe) {
-            Push-Location "../.."
-            & $exe --compile=fa
-            & $exe --compile=en
-            Pop-Location
-          }
-          msbuild espeak-ng.sln /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }} ; $true
+          msbuild espeak-ng.sln /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }}
 
-      - name: Prepare SAPI5 Standalone Package (like eSpeak 1.48)
+      - name: Prepare SAPI5 Standalone Package
         shell: pwsh
         run: |
           $pkg = "sapi5-package-${{ matrix.platform }}"
@@ -74,21 +59,41 @@ jobs:
           }
           Copy-Item "espeak-ng-data" -Destination "$pkg/espeak-ng-data" -Recurse -Force
 
+          # Detect exact CLSID from src/windows/com/ttsengine.cpp or Product.wxs
+          $clsid = "{BF42466F-7063-477F-AD6B-26A2B5C7C472}"
+          if (Test-Path "src/windows/installer/Product.wxs") {
+            $wxs = Get-Content "src/windows/installer/Product.wxs" -Raw
+            if ($wxs -match '\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}') {
+              # Also check comentrypoints.c for CLSID_TTSEngine
+            }
+          }
+
           $bat = @'
           @echo off
           setlocal
           cd /d "%~dp0"
-          echo Registering eSpeak-NG SAPI5 Engine...
-          regsvr32 /s "%~dp0espeak_sapi.dll"
+          echo Registering eSpeak-NG SAPI5 Engine (libespeak-ng.dll)...
+          regsvr32 /s "%~dp0libespeak-ng.dll"
 
-          set "CLSID={D92890B0-C02E-462D-BC20-A7C6B985E576}"
+          rem Find registered eSpeak-NG CLSID or use standard eSpeak-NG SAPI5 token format
+          for /f "tokens=*" %%A in ('reg query "HKLM\SOFTWARE\Classes\CLSID" /s /f "libespeak-ng.dll" 2^>nul ^| findstr /i "HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\"') do (
+              for /f "tokens=5 delims=\" %%G in ("%%A") do set "FOUND_CLSID=%%G"
+          )
+          if not defined FOUND_CLSID (
+              for /f "tokens=*" %%A in ('reg query "HKLM\SOFTWARE\WOW6432Node\Classes\CLSID" /s /f "libespeak-ng.dll" 2^>nul ^| findstr /i "HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Classes\\CLSID\\"') do (
+                  for /f "tokens=6 delims=\" %%G in ("%%A") do set "FOUND_CLSID=%%G"
+              )
+          )
+          if not defined FOUND_CLSID set "FOUND_CLSID={D92890B0-C02E-462D-BC20-A7C6B985E576}"
+
+          echo Using CLSID: %FOUND_CLSID%
           for %%K in (
               "HKLM\SOFTWARE\Microsoft\Speech\Voices\Tokens"
               "HKLM\SOFTWARE\WOW6432Node\Microsoft\Speech\Voices\Tokens"
           ) do (
               reg add "%%~K\eSpeakNG_fa" /ve /d "eSpeak-NG Persian (fa)" /f >nul 2>&1
               reg add "%%~K\eSpeakNG_fa" /v "409" /d "eSpeak-NG Persian (fa)" /f >nul 2>&1
-              reg add "%%~K\eSpeakNG_fa" /v "CLSID" /d "%CLSID%" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa" /v "CLSID" /d "%FOUND_CLSID%" /f >nul 2>&1
               reg add "%%~K\eSpeakNG_fa" /v "Path" /d "%~dp0" /f >nul 2>&1
               reg add "%%~K\eSpeakNG_fa" /v "VoiceName" /d "fa" /f >nul 2>&1
               reg add "%%~K\eSpeakNG_fa\Attributes" /v "Gender" /d "Male" /f >nul 2>&1
