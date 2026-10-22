@@ -1,0 +1,70 @@
+name: windows-sapi
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    name: "eSpeak NG SAPI5 (Windows 7+)"
+
+    steps:
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Install Windows 8.1 SDK
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Method Get -Uri https://go.microsoft.com/fwlink/p/?LinkId=323507 -OutFile sdksetup.exe -UseBasicParsing
+          Start-Process -Wait sdksetup.exe -ArgumentList "/q", "/norestart", "/features", "OptionId.WindowsDesktopSoftwareDevelopmentKit", "OptionId.NetFxSoftwareDevelopmentKit"
+
+      - name: Install WiX
+        run: dotnet tool install --global wix
+
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Install pefile
+        run: pip install pefile
+
+      - name: Apply Persian fix (American accent, no emoji)
+        shell: pwsh
+        run: python apply-espeak-fix.py --no-emoji
+
+      - name: Apply Windows 7 / SAPI5 changes
+        shell: pwsh
+        run: python apply-sapi-win7.py
+
+      - name: Build x86
+        continue-on-error: true   # the MSI step at the end of the solution may fail; the DLL check below decides
+        working-directory: "src/windows"
+        shell: pwsh
+        run: msbuild espeak-ng.sln /p:Configuration=Release /p:Platform=x86
+
+      - name: Check and collect x86 DLL
+        shell: pwsh
+        run: python check-win7-imports.py x86 espeak-ng-sapi/x86
+
+      - name: Build x64
+        continue-on-error: true   # the MSI step at the end of the solution may fail; the DLL check below decides
+        working-directory: "src/windows"
+        shell: pwsh
+        run: msbuild espeak-ng.sln /p:Configuration=Release /p:Platform=x64
+
+      - name: Check and collect x64 DLL
+        shell: pwsh
+        run: python check-win7-imports.py x64 espeak-ng-sapi/x64
+
+      - name: Assemble package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "espeak-ng-data/phontab")) { throw "espeak-ng-data was not built" }
+          Copy-Item "espeak-ng-data" -Destination "espeak-ng-sapi/espeak-ng-data" -Recurse -Force
+          Copy-Item "install-sapi.bat" -Destination "espeak-ng-sapi/" -Force
+          Copy-Item "uninstall-sapi.bat" -Destination "espeak-ng-sapi/" -Force
+
+      - name: Upload SAPI5 package
+        uses: actions/upload-artifact@v7
+        with:
+          name: espeak-ng-sapi5-win7
+          path: "espeak-ng-sapi/"
