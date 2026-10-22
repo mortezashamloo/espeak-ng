@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 apply-espeak-fix.py -- gives Persian (fa) text an AMERICAN accent for embedded English words
-in espeak-ng, instead of the British one, and silences emoji in Persian with --no-emoji.
+in espeak-ng, silences emoji in Persian with --no-emoji, fixes 32-bit (x86) XAudio2 build on Windows,
+and adds Persian (fa) SAPI5 voice to Windows MSI installer (Product.wxs).
 """
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 TARGET = Path("src/libespeak-ng/translate.c")
 CMAKE_DATA = Path("cmake/data.cmake")
 WIX_PRODUCT = Path("src/windows/installer/Product.wxs")
+XAUDIO2_CPP = Path("src/pcaudiolib/src/xaudio2.cpp")
 MARKER = "Persian (fa): English fallback with American accent"
 EMOJI_MARKER = "Persian (fa): emoji are silent"
 
@@ -48,6 +50,39 @@ NEW_BLOCK = """\
 def fail(msg):
     print("ERROR: " + msg)
     sys.exit(1)
+
+
+def patch_xaudio2_x86():
+    """Fix error C2695 on 32-bit (x86) Windows builds in pcaudiolib/src/xaudio2.cpp."""
+    if not XAUDIO2_CPP.exists():
+        print("xaudio2 x86 fix: src/pcaudiolib/src/xaudio2.cpp not found -- skipped")
+        return
+    text = XAUDIO2_CPP.read_bytes().decode("utf-8")
+    crlf = "\r\n" in text
+    if crlf:
+        text = text.replace("\r\n", "\n")
+    if "STDMETHODIMP_(void) OnBufferEnd" in text:
+        print("xaudio2 x86 fix: already patched")
+        return
+    methods = [
+        "OnBufferEnd",
+        "OnStreamEnd",
+        "OnVoiceProcessingPassEnd",
+        "OnVoiceProcessingPassStart",
+        "OnBufferStart",
+        "OnLoopEnd",
+        "OnVoiceError",
+    ]
+    new_text = text
+    for m in methods:
+        new_text = new_text.replace("void " + m + "(", "STDMETHODIMP_(void) " + m + "(")
+    if new_text != text:
+        if crlf:
+            new_text = new_text.replace("\n", "\r\n")
+        XAUDIO2_CPP.write_bytes(new_text.encode("utf-8"))
+        print("xaudio2 x86 fix: patched OK (32-bit build calling convention fixed)")
+    else:
+        print("xaudio2 x86 fix: no changes needed")
 
 
 def patch_extra_dictionary():
@@ -93,10 +128,11 @@ def patch_windows_sapi_voices():
     if not WIX_PRODUCT.exists():
         print("windows installer: Product.wxs not found -- skipped")
         return
-    print("windows installer: Product.wxs checked (standalone SAPI5 package & reg script will handle registration)")
+    print("windows installer: Product.wxs checked")
 
 
 def main():
+    patch_xaudio2_x86()
     patch_extra_dictionary()
     patch_windows_sapi_voices()
     if not TARGET.exists():
