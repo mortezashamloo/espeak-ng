@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
 apply-espeak-fix.py -- gives Persian (fa) text an AMERICAN accent for embedded English words
-in espeak-ng, instead of the British one, silences emojis in Persian with --no-emoji,
-and registers Persian (fa) in Windows SAPI5 installer.
+in espeak-ng, instead of the British one, and silences emoji in Persian with --no-emoji.
 """
-import re
 import sys
 from pathlib import Path
 
@@ -53,7 +51,6 @@ def fail(msg):
 
 
 def patch_extra_dictionary():
-    """cmake/data.cmake: also copy <lang>_extra into the temporary dictionary folder (like _emoji)."""
     if not CMAKE_DATA.exists():
         print("extra dictionaries: cmake/data.cmake not found -- skipped")
         return
@@ -75,7 +72,6 @@ def patch_extra_dictionary():
         out_lines.append(lines[i])
         if not patched and target_line in lines[i]:
             ind = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-            # copy until endif()
             while i + 1 < len(lines):
                 i += 1
                 out_lines.append(lines[i])
@@ -94,13 +90,8 @@ def patch_extra_dictionary():
 
 
 def patch_windows_sapi_voices():
-    """Ensure Persian (fa) voice is registered in Windows MSI installer (Product.wxs) if present."""
     if not WIX_PRODUCT.exists():
         print("windows installer: Product.wxs not found -- skipped")
-        return
-    text = WIX_PRODUCT.read_bytes().decode("utf-8")
-    if "eSpeak-NG Persian" in text or "espeak-ng-fa" in text:
-        print("windows installer: Persian SAPI5 voice already in Product.wxs")
         return
     print("windows installer: Product.wxs checked (standalone SAPI5 package & reg script will handle registration)")
 
