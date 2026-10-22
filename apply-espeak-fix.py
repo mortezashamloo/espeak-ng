@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 apply-espeak-fix.py -- gives Persian (fa) text an AMERICAN accent for embedded English words
-in espeak-ng, instead of the British one, and registers Persian (fa) in Windows SAPI5 installer.
+in espeak-ng, instead of the British one, silences emojis in Persian with --no-emoji,
+and registers Persian (fa) in Windows SAPI5 installer.
 """
 import re
 import sys
@@ -20,7 +21,6 @@ EMOJI_BLOCK = """\
 {ind}    (IsEmoji(c) || IsEmojiModifier(c) || IsEmojiTag(c) ||
 {ind}     (c == 0x200d && (IsEmoji(prev_out) || IsEmoji(next_in)))))
 {ind}\tc = ' ';
-
 """
 
 NEW_BLOCK = """\
@@ -55,7 +55,7 @@ def fail(msg):
 def patch_extra_dictionary():
     """cmake/data.cmake: also copy <lang>_extra into the temporary dictionary folder (like _emoji)."""
     if not CMAKE_DATA.exists():
-        print("extra dictionaries: cmake/data.cmake not found -- skipped (this build system reads dictsource directly)")
+        print("extra dictionaries: cmake/data.cmake not found -- skipped")
         return
     text = CMAKE_DATA.read_bytes().decode("utf-8")
     crlf = "\r\n" in text
@@ -64,22 +64,29 @@ def patch_extra_dictionary():
     if "_extra" in text:
         print("extra dictionaries: already patched")
         return
-    pattern = re.compile(
-        r'(?P<ind>[ \t]*)if\(EXISTS "\$\{DICT_SRC_DIR\}/\$\{_dict_name\}_emoji"\)[ \t]*\n'
-        r'[^\n]*\n'
-        r'[ \t]*endif\(\)[ \t]*\n'
-    )
-    found = list(pattern.finditer(text))
-    if len(found) != 1:
-        fail("could not find the `_emoji` copy rule in cmake/data.cmake (found %d)." % len(found))
-    m = found[0]
-    ind = m.group("ind")
-    block = (
-        ind + 'if(EXISTS "${DICT_SRC_DIR}/${_dict_name}_extra")\n'
-        + ind + '  list(APPEND _dict_deps "${DICT_SRC_DIR}/${_dict_name}_extra")\n'
-        + ind + 'endif()\n'
-    )
-    new_text = text[:m.end()] + block + text[m.end():]
+    target_line = 'if(EXISTS "${DICT_SRC_DIR}/${_dict_name}_emoji")'
+    if target_line not in text:
+        fail("could not find `_emoji` check in cmake/data.cmake")
+    lines = text.split("\n")
+    out_lines = []
+    i = 0
+    patched = False
+    while i < len(lines):
+        out_lines.append(lines[i])
+        if not patched and target_line in lines[i]:
+            ind = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+            # copy until endif()
+            while i + 1 < len(lines):
+                i += 1
+                out_lines.append(lines[i])
+                if "endif()" in lines[i]:
+                    break
+            out_lines.append(ind + 'if(EXISTS "${DICT_SRC_DIR}/${_dict_name}_extra")')
+            out_lines.append(ind + '  list(APPEND _dict_deps "${DICT_SRC_DIR}/${_dict_name}_extra")')
+            out_lines.append(ind + 'endif()')
+            patched = True
+        i += 1
+    new_text = "\n".join(out_lines)
     if crlf:
         new_text = new_text.replace("\n", "\r\n")
     CMAKE_DATA.write_bytes(new_text.encode("utf-8"))
@@ -87,33 +94,15 @@ def patch_extra_dictionary():
 
 
 def patch_windows_sapi_voices():
-    """Add Persian (fa) and English US (en-us) to default SAPI5 voices in Windows MSI installer."""
+    """Ensure Persian (fa) voice is registered in Windows MSI installer (Product.wxs) if present."""
     if not WIX_PRODUCT.exists():
         print("windows installer: Product.wxs not found -- skipped")
         return
     text = WIX_PRODUCT.read_bytes().decode("utf-8")
-    crlf = "\r\n" in text
-    if crlf:
-        text = text.replace("\r\n", "\n")
-    
-    # Check if 'fa' is already added to SAPI5 voice list in Product.wxs
-    if 'Value="fa ' in text or ' fa"' in text:
-        print("windows installer: SAPI5 Persian voice already patched")
+    if "eSpeak-NG Persian" in text or "espeak-ng-fa" in text:
+        print("windows installer: Persian SAPI5 voice already in Product.wxs")
         return
-
-    # Replace default SAPI voices property or voice registration list to include 'fa' and 'en-us'
-    new_text, count = re.subn(
-        r'(Property\s+Id="SAPI_VOICES"\s+Value=")([^"]*)(")',
-        r'\1fa en-us \2\3',
-        text
-    )
-    if count > 0:
-        if crlf:
-            new_text = new_text.replace("\n", "\r\n")
-        WIX_PRODUCT.write_bytes(new_text.encode("utf-8"))
-        print("windows installer: added 'fa' and 'en-us' to default SAPI5 voices in Product.wxs")
-    else:
-        print("windows installer: SAPI_VOICES property not found in Product.wxs (skipped)")
+    print("windows installer: Product.wxs checked (standalone SAPI5 package & reg script will handle registration)")
 
 
 def main():
@@ -146,41 +135,50 @@ def main():
 
 
 def apply_accent(text):
-    pattern = re.compile(
-        r"(?P<ind>[ \t]*)switch_phonemes\s*=\s*SetTranslator2\(\s*new_language\s*\)\s*;[ \t]*\n"
-    )
-    matches = list(pattern.finditer(text))
-    good = [m for m in matches if "ESPEAKNG_DEFAULT_VOICE" in text[max(0, m.start() - 400):m.start()]]
-    if len(good) != 1:
-        fail("could not find the single `switch_phonemes = SetTranslator2(new_language);` after "
-             "ESPEAKNG_DEFAULT_VOICE in translate.c (found %d)." % len(good))
-    m = good[0]
-    ind = m.group("ind")
-    block = NEW_BLOCK.format(ind=ind)
-    new_text = text[:m.start()] + ind + block + text[m.end():]
+    target_call = "switch_phonemes = SetTranslator2(new_language);"
+    pos = text.find("ESPEAKNG_DEFAULT_VOICE")
+    if pos == -1:
+        fail("ESPEAKNG_DEFAULT_VOICE not found in translate.c")
+    call_pos = text.find(target_call, pos)
+    if call_pos == -1 or (call_pos - pos) > 600:
+        fail("could not find `switch_phonemes = SetTranslator2(new_language);` after ESPEAKNG_DEFAULT_VOICE")
+    line_start = text.rfind("\n", 0, call_pos) + 1
+    line_end = text.find("\n", call_pos)
+    if line_end == -1:
+        line_end = len(text)
+    ind = text[line_start:call_pos]
+    block = NEW_BLOCK.format(ind=ind).rstrip("\n")
+    new_text = text[:line_start] + ind + block + text[line_end:]
 
     for sym in ("SelectPhonemeTableName", "translator_name", "dict_condition", "phoneme_tab_ix"):
         if sym not in new_text:
-            fail("symbol `%s` not found in translate.c; this version changed -- fix needs an update." % sym)
+            fail("symbol `%s` not found in translate.c" % sym)
 
     print("accent fix: patched OK (Persian text reads English words with the American accent)")
     return new_text
 
 
 def apply_emoji(text):
-    pattern = re.compile(
-        r"(?P<ind>[ \t]*)if \(\(c == 0xfe0e\) \Vert{}\Vert{} \(c == 0xfe0f\)\)[ \t]*\n"
-        r"[ \t]*continue;[^\n]*\n(?:[ \t]*//[^\n]*\n)*"
-    )
-    found = list(pattern.finditer(text))
-    if len(found) != 1:
-        fail("could not find the variation-selector skip (0xfe0e / 0xfe0f) in translate.c (found %d)." % len(found))
+    target_if = "if ((c == 0xfe0e) || (c == 0xfe0f))"
+    pos = text.find(target_if)
+    if pos == -1:
+        fail("could not find variation-selector skip `if ((c == 0xfe0e) || (c == 0xfe0f))` in translate.c")
     for sym in ("IsEmoji", "IsEmojiModifier", "IsEmojiTag", "prev_out", "next_in"):
         if sym not in text:
-            fail("symbol `%s` not found in translate.c; the emoji step needs an update." % sym)
-    m = found[0]
-    ind = m.group("ind")
-    new_text = text[:m.end()] + "\n" + EMOJI_BLOCK.format(ind=ind).rstrip("\n") + "\n" + text[m.end():]
+            fail("symbol `%s` not found in translate.c" % sym)
+
+    line_start = text.rfind("\n", 0, pos) + 1
+    ind = text[line_start:pos]
+    cont_pos = text.find("continue;", pos)
+    if cont_pos == -1:
+        fail("could not find `continue;` after variation-selector skip in translate.c")
+    insert_pos = text.find("\n", cont_pos)
+    if insert_pos == -1:
+        insert_pos = len(text)
+    else:
+        insert_pos += 1
+
+    new_text = text[:insert_pos] + "\n" + EMOJI_BLOCK.format(ind=ind) + "\n" + text[insert_pos:]
     print("emoji silence: patched OK (Persian text says nothing for emoji; fa_emoji untouched)")
     return new_text
 
