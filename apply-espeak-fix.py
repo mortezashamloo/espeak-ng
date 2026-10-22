@@ -1,16 +1,42 @@
 #!/usr/bin/env python3
 """
 apply-espeak-fix.py -- gives Persian (fa) text an AMERICAN accent for embedded English words
-in espeak-ng, silences emoji in Persian with --no-emoji, fixes 32-bit (x86) XAudio2 build on Windows,
-and adds Persian (fa) SAPI5 voice to Windows MSI installer (Product.wxs).
+in espeak-ng, instead of the British one.
+
+Run it from the root of an espeak-ng source tree (the folder that contains `src/`), before building:
+
+    python3 apply-espeak-fix.py
+
+It edits only src/libespeak-ng/translate.c, inside the word-translation code (the place where a word
+asks for the fallback language's translator).  When the current voice is Persian ("fa") and the
+fallback language is English, it:
+  * asks for the real "en" translator (so the English dictionary, abbreviations, acronym
+    handling and langopts stay exactly as upstream),
+  * switches that translator's phoneme table to "en-us",
+  * turns on dictionary rule conditions 3 and 6 (the same ones voices/en-us uses: `dictrules 3 6`).
+Every other language keeps upstream behaviour.
+
+It ALSO makes the build read your own `dictsource/<lang>_extra` files (always on, e.g. `fa_extra`).
+The stock CMake data build (used by the Android build) copies only `_rules`, `_list`, `_listx` and
+`_emoji` into its temporary dictionary folder, so a `fa_extra` file was silently ignored.  This adds
+the missing copy (cmake/data.cmake).  Nothing changes when no `*_extra` file exists.
+
+With the option `--no-emoji` it ALSO makes Persian text SILENT for emoji.  Without that option emoji
+are read exactly as upstream does (so: remove `--no-emoji` from the workflow to get emoji read again).
+The `fa_emoji` dictionary file is NOT touched or emptied: in the clause tokenizer, when the voice is Persian, every
+emoji character (faces, hearts, flags, skin tones, joiners, tag characters) is turned into a space
+before it can reach the dictionary, so nothing is said for it and the words around it stay separate.
+
+It is safe to run again (it says "already patched").  If a new espeak-ng version moved the code so
+that the spot can no longer be found, it stops with a clear message and a non-zero exit code, so a
+GitHub Actions build fails visibly instead of silently building without the fix.
 """
+import re
 import sys
 from pathlib import Path
 
 TARGET = Path("src/libespeak-ng/translate.c")
 CMAKE_DATA = Path("cmake/data.cmake")
-WIX_PRODUCT = Path("src/windows/installer/Product.wxs")
-XAUDIO2_CPP = Path("src/pcaudiolib/src/xaudio2.cpp")
 MARKER = "Persian (fa): English fallback with American accent"
 EMOJI_MARKER = "Persian (fa): emoji are silent"
 
@@ -21,6 +47,7 @@ EMOJI_BLOCK = """\
 {ind}    (IsEmoji(c) || IsEmojiModifier(c) || IsEmojiTag(c) ||
 {ind}     (c == 0x200d && (IsEmoji(prev_out) || IsEmoji(next_in)))))
 {ind}\tc = ' ';
+
 """
 
 NEW_BLOCK = """\
@@ -52,42 +79,10 @@ def fail(msg):
     sys.exit(1)
 
 
-def patch_xaudio2_x86():
-    """Fix error C2695 on 32-bit (x86) Windows builds in pcaudiolib/src/xaudio2.cpp."""
-    if not XAUDIO2_CPP.exists():
-        print("xaudio2 x86 fix: src/pcaudiolib/src/xaudio2.cpp not found -- skipped")
-        return
-    text = XAUDIO2_CPP.read_bytes().decode("utf-8")
-    crlf = "\r\n" in text
-    if crlf:
-        text = text.replace("\r\n", "\n")
-    if "STDMETHODIMP_(void) OnBufferEnd" in text:
-        print("xaudio2 x86 fix: already patched")
-        return
-    methods = [
-        "OnBufferEnd",
-        "OnStreamEnd",
-        "OnVoiceProcessingPassEnd",
-        "OnVoiceProcessingPassStart",
-        "OnBufferStart",
-        "OnLoopEnd",
-        "OnVoiceError",
-    ]
-    new_text = text
-    for m in methods:
-        new_text = new_text.replace("void " + m + "(", "STDMETHODIMP_(void) " + m + "(")
-    if new_text != text:
-        if crlf:
-            new_text = new_text.replace("\n", "\r\n")
-        XAUDIO2_CPP.write_bytes(new_text.encode("utf-8"))
-        print("xaudio2 x86 fix: patched OK (32-bit build calling convention fixed)")
-    else:
-        print("xaudio2 x86 fix: no changes needed")
-
-
 def patch_extra_dictionary():
+    """cmake/data.cmake: also copy <lang>_extra into the temporary dictionary folder (like _emoji)."""
     if not CMAKE_DATA.exists():
-        print("extra dictionaries: cmake/data.cmake not found -- skipped")
+        print("extra dictionaries: cmake/data.cmake not found -- skipped (this build system reads dictsource directly)")
         return
     text = CMAKE_DATA.read_bytes().decode("utf-8")
     crlf = "\r\n" in text
@@ -96,45 +91,31 @@ def patch_extra_dictionary():
     if "_extra" in text:
         print("extra dictionaries: already patched")
         return
-    target_line = 'if(EXISTS "${DICT_SRC_DIR}/${_dict_name}_emoji")'
-    if target_line not in text:
-        fail("could not find `_emoji` check in cmake/data.cmake")
-    lines = text.split("\n")
-    out_lines = []
-    i = 0
-    patched = False
-    while i < len(lines):
-        out_lines.append(lines[i])
-        if not patched and target_line in lines[i]:
-            ind = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-            while i + 1 < len(lines):
-                i += 1
-                out_lines.append(lines[i])
-                if "endif()" in lines[i]:
-                    break
-            out_lines.append(ind + 'if(EXISTS "${DICT_SRC_DIR}/${_dict_name}_extra")')
-            out_lines.append(ind + '  list(APPEND _dict_deps "${DICT_SRC_DIR}/${_dict_name}_extra")')
-            out_lines.append(ind + 'endif()')
-            patched = True
-        i += 1
-    new_text = "\n".join(out_lines)
+    pattern = re.compile(
+        r'(?P<ind>[ \t]*)if\(EXISTS "\$\{DICT_SRC_DIR\}/\$\{_dict_name\}_emoji"\)[ \t]*\n'
+        r'[^\n]*\n'
+        r'[ \t]*endif\(\)[ \t]*\n'
+    )
+    found = list(pattern.finditer(text))
+    if len(found) != 1:
+        fail("could not find the `_emoji` copy rule in cmake/data.cmake (found %d). This espeak-ng version "
+             "changed that file; the *_extra step needs a small update." % len(found))
+    m = found[0]
+    ind = m.group("ind")
+    block = (
+        ind + 'if(EXISTS "${DICT_SRC_DIR}/${_dict_name}_extra")\n'
+        + ind + '  list(APPEND _dict_deps "${DICT_SRC_DIR}/${_dict_name}_extra")\n'
+        + ind + 'endif()\n'
+    )
+    new_text = text[:m.end()] + block + text[m.end():]
     if crlf:
         new_text = new_text.replace("\n", "\r\n")
     CMAKE_DATA.write_bytes(new_text.encode("utf-8"))
     print("extra dictionaries: patched OK (<lang>_extra files are now compiled, e.g. fa_extra)")
 
 
-def patch_windows_sapi_voices():
-    if not WIX_PRODUCT.exists():
-        print("windows installer: Product.wxs not found -- skipped")
-        return
-    print("windows installer: Product.wxs checked")
-
-
 def main():
-    patch_xaudio2_x86()
     patch_extra_dictionary()
-    patch_windows_sapi_voices()
     if not TARGET.exists():
         fail("%s not found. Run this from the root of the espeak-ng source tree." % TARGET)
     text = TARGET.read_bytes().decode("utf-8")
@@ -162,50 +143,51 @@ def main():
 
 
 def apply_accent(text):
-    target_call = "switch_phonemes = SetTranslator2(new_language);"
-    pos = text.find("ESPEAKNG_DEFAULT_VOICE")
-    if pos == -1:
-        fail("ESPEAKNG_DEFAULT_VOICE not found in translate.c")
-    call_pos = text.find(target_call, pos)
-    if call_pos == -1 or (call_pos - pos) > 600:
-        fail("could not find `switch_phonemes = SetTranslator2(new_language);` after ESPEAKNG_DEFAULT_VOICE")
-    line_start = text.rfind("\n", 0, call_pos) + 1
-    line_end = text.find("\n", call_pos)
-    if line_end == -1:
-        line_end = len(text)
-    ind = text[line_start:call_pos]
-    block = NEW_BLOCK.format(ind=ind).rstrip("\n")
-    new_text = text[:line_start] + ind + block + text[line_end:]
 
+    # The one call in TranslateClause that hands the fallback language to SetTranslator2,
+    # right after the default-voice fallback.  Whitespace-tolerant.
+    pattern = re.compile(
+        r"(?P<ind>[ \t]*)switch_phonemes\s*=\s*SetTranslator2\(\s*new_language\s*\)\s*;[ \t]*\n"
+    )
+    matches = list(pattern.finditer(text))
+    # keep only the match(es) that sit right after ESPEAKNG_DEFAULT_VOICE (the clause fallback)
+    good = [m for m in matches if "ESPEAKNG_DEFAULT_VOICE" in text[max(0, m.start() - 400):m.start()]]
+    if len(good) != 1:
+        fail("could not find the single `switch_phonemes = SetTranslator2(new_language);` after "
+             "ESPEAKNG_DEFAULT_VOICE in translate.c (found %d). This espeak-ng version changed that "
+             "code; the fix needs a small update." % len(good))
+    m = good[0]
+    ind = m.group("ind")
+    block = NEW_BLOCK.format(ind=ind)
+    # first line of NEW_BLOCK has no indent because the match already starts with the indent
+    new_text = text[:m.start()] + ind + block + text[m.end():]
+
+    # sanity: the symbols the block uses must exist in this version
     for sym in ("SelectPhonemeTableName", "translator_name", "dict_condition", "phoneme_tab_ix"):
         if sym not in new_text:
-            fail("symbol `%s` not found in translate.c" % sym)
+            fail("symbol `%s` not found in translate.c; this version changed -- fix needs an update." % sym)
 
     print("accent fix: patched OK (Persian text reads English words with the American accent)")
     return new_text
 
 
 def apply_emoji(text):
-    target_if = "if ((c == 0xfe0e) || (c == 0xfe0f))"
-    pos = text.find(target_if)
-    if pos == -1:
-        fail("could not find variation-selector skip `if ((c == 0xfe0e) || (c == 0xfe0f))` in translate.c")
+    # In the clause tokenizer, right after the variation-selector skip (U+FE0E / U+FE0F).
+    pattern = re.compile(
+        r"(?P<ind>[ \t]*)if \(\(c == 0xfe0e\) \|\| \(c == 0xfe0f\)\)[ \t]*\n"
+        r"[ \t]*continue;[^\n]*\n(?:[ \t]*//[^\n]*\n)*"
+    )
+    found = list(pattern.finditer(text))
+    if len(found) != 1:
+        fail("could not find the variation-selector skip (0xfe0e / 0xfe0f) in translate.c (found %d). "
+             "This espeak-ng version changed that code; the emoji step needs a small update. "
+             "(Run without --no-emoji to apply only the accent fix.)" % len(found))
     for sym in ("IsEmoji", "IsEmojiModifier", "IsEmojiTag", "prev_out", "next_in"):
         if sym not in text:
-            fail("symbol `%s` not found in translate.c" % sym)
-
-    line_start = text.rfind("\n", 0, pos) + 1
-    ind = text[line_start:pos]
-    cont_pos = text.find("continue;", pos)
-    if cont_pos == -1:
-        fail("could not find `continue;` after variation-selector skip in translate.c")
-    insert_pos = text.find("\n", cont_pos)
-    if insert_pos == -1:
-        insert_pos = len(text)
-    else:
-        insert_pos += 1
-
-    new_text = text[:insert_pos] + "\n" + EMOJI_BLOCK.format(ind=ind) + "\n" + text[insert_pos:]
+            fail("symbol `%s` not found in translate.c; the emoji step needs an update." % sym)
+    m = found[0]
+    ind = m.group("ind")
+    new_text = text[:m.end()] + "\n" + EMOJI_BLOCK.format(ind=ind).rstrip("\n") + "\n" + text[m.end():]
     print("emoji silence: patched OK (Persian text says nothing for emoji; fa_emoji untouched)")
     return new_text
 
