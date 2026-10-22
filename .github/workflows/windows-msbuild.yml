@@ -10,37 +10,101 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    name: "build: ${{ matrix.config }}"
+    name: "build: ${{ matrix.platform }} - ${{ matrix.config }}"
     strategy:
       fail-fast: false
       matrix:
-        config: [Debug, Release]
+        config: [Release]
+        platform: [x86, x64]
+        include:
+          - platform: x86
+            out_dir: Win32
+          - platform: x64
+            out_dir: x64
 
     steps:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v3
+
       - name: Install Windows 8.1 SDK
         shell: powershell
         run: |
           Invoke-WebRequest -Method Get -Uri https://go.microsoft.com/fwlink/p/?LinkId=323507 -OutFile sdksetup.exe -UseBasicParsing
           Start-Process -Wait sdksetup.exe -ArgumentList "/q", "/norestart", "/features", "OptionId.WindowsDesktopSoftwareDevelopmentKit", "OptionId.NetFxSoftwareDevelopmentKit"
+
       - name: Install WiX
         run: dotnet tool install --global wix
+
       - name: Checkout repo
         uses: actions/checkout@v7
+
       - name: Checkout pcaudiolib
         uses: actions/checkout@v7
         with:
           repository: "espeak-ng/pcaudiolib"
           path: "src/pcaudiolib"
+
       - name: Apply Persian fixes
         shell: pwsh
         run: python apply-espeak-fix.py --no-emoji
-      - name: Do build
+
+      - name: Build Solution (including espeak_sapi.dll and MSI)
         working-directory: "src/windows"
-        run: msbuild espeak-ng.sln /p:Configuration=${{ matrix.config }} /p:Platform=x64
-      - name: Upload MSI installer
+        run: msbuild espeak-ng.sln /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }}
+
+      - name: Prepare SAPI5 Standalone Package (like eSpeak 1.48)
+        shell: pwsh
+        run: |
+          $pkg = "sapi5-package-${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          
+          # Copy compiled binaries and SAPI5 DLL
+          Copy-Item "src/windows/${{ matrix.out_dir }}/${{ matrix.config }}/*.dll" -Destination $pkg -Force
+          Copy-Item "src/windows/${{ matrix.out_dir }}/${{ matrix.config }}/*.exe" -Destination $pkg -Force
+          Copy-Item "espeak-ng-data" -Destination "$pkg/espeak-ng-data" -Recurse -Force
+
+          # Create batch script to register SAPI5 DLL & Persian voice directly in Registry (like eSpeak 1.48)
+          $bat = @'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          echo Registering eSpeak-NG SAPI5 Engine...
+          regsvr32 /s "%~dp0espeak_sapi.dll"
+
+          set "CLSID={D92890B0-C02E-462D-BC20-A7C6B985E576}"
+          if "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
+              if exist "%~dp0" (
+                  rem Register in both standard and WOW6432Node depending on DLL architecture
+              )
+          )
+
+          for %%K in (
+              "HKLM\SOFTWARE\Microsoft\Speech\Voices\Tokens"
+              "HKLM\SOFTWARE\WOW6432Node\Microsoft\Speech\Voices\Tokens"
+          ) do (
+              reg add "%%~K\eSpeakNG_fa" /ve /d "eSpeak-NG Persian (fa)" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa" /v "409" /d "eSpeak-NG Persian (fa)" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa" /v "CLSID" /d "%CLSID%" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa" /v "Path" /d "%~dp0\" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa" /v "VoiceName" /d "fa" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa\Attributes" /v "Gender" /d "Male" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa\Attributes" /v "Language" /d "429" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa\Attributes" /v "Name" /d "eSpeak-NG Persian" /f >nul 2>&1
+              reg add "%%~K\eSpeakNG_fa\Attributes" /v "Vendor" /d "eSpeak-NG" /f >nul 2>&1
+          )
+          echo Done! eSpeak-NG Persian SAPI5 voice is now registered.
+          pause
+          '@
+          Set-Content -Path "$pkg/register-sapi5.bat" -Value $bat -Encoding ASCII
+
+      - name: Upload MSI installer (${{ matrix.platform }})
         uses: actions/upload-artifact@v7
         with:
-          name: windows-${{ matrix.config }}-msi
-          path: "src/windows/installer/bin/x64/${{ matrix.config }}/espeak-ng.msi"
+          name: windows-${{ matrix.platform }}-${{ matrix.config }}-msi
+          path: "src/windows/installer/bin/${{ matrix.platform }}/${{ matrix.config }}/espeak-ng.msi"
+
+      - name: Upload SAPI5 Standalone Package (${{ matrix.platform }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.platform }}-sapi5-standalone
+          path: "sapi5-package-${{ matrix.platform }}/"
