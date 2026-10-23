@@ -11,7 +11,8 @@ Makes the SAPI5 build of espeak-ng usable on Windows 7 and fixes its speed/pitch
     redistributables (which Windows 7 does not have by default).
  3. The SAPI engine (src/windows/com/ttsengine.cpp) now honours the host's speed, pitch and volume
     (upstream ignores them, so the rate slider in JAWS / NVDA did nothing), speaks only the text of the
-    fragments, joined into one call (upstream also read the host's trailing XML aloud, and per-fragment
+    fragments (joined into one call, with a space where host markup sat between them), takes the speed from
+    the host's rate setting too (upstream also read the host's trailing XML aloud, and per-fragment
     calls pause after every word) and returns S_OK.
 
 Every edit must match exactly once, otherwise the script stops with an error and a non-zero exit code
@@ -111,7 +112,7 @@ NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t\t\t\t                 && f->State.PitchAdj.MiddleAdj == first->State.PitchAdj.MiddleAdj
 \t\t\t\t\t                 && f->State.PitchAdj.RangeAdj == first->State.PitchAdj.RangeAdj))
 \t\t\t\t\t\tbreak;
-\t\t\t\t\ttotal += f->ulTextLen;
+\t\t\t\t\ttotal += f->ulTextLen + 1;   // +1: room for a space between fragments
 \t\t\t\t\tlast = f;
 \t\t\t\t}
 \t\t\t\telse if (f->State.eAction != SPVA_Bookmark)
@@ -120,7 +121,14 @@ NEW_SPEAK = """\t\tcase SPVA_Speak:
 
 \t\t\t// Honour the host's speed / pitch / volume (JAWS, NVDA ... send them with the text).
 \t\t\t// SAPI rate step: -10 .. +10, about 3x slower / 3x faster at the ends.
-\t\t\tint wpm = (int)(175.0 * pow(3.0, first->State.RateAdj / 10.0) + 0.5);
+\t\t\t// The host sets its speed slider through the SAPI voice (site->GetRate); XML <rate> tags add to it.
+\t\t\tlong baseRate = 0;
+\t\t\tif (site)
+\t\t\t\tsite->GetRate(&baseRate);
+\t\t\tlong rateAdj = baseRate + first->State.RateAdj;
+\t\t\tif (rateAdj < -10) rateAdj = -10;
+\t\t\tif (rateAdj > 10) rateAdj = 10;
+\t\t\tint wpm = (int)(175.0 * pow(3.0, rateAdj / 10.0) + 0.5);
 \t\t\tif (wpm < 80) wpm = 80;
 \t\t\tif (wpm > 450) wpm = 450;
 \t\t\tint pitch = 50 + (int)first->State.PitchAdj.MiddleAdj * 5;
@@ -136,12 +144,24 @@ NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t\tif (buf)
 \t\t\t{
 \t\t\t\tsize_t n = 0;
+\t\t\t\tconst WCHAR *prevEnd = NULL;
 \t\t\t\tfor (const SPVTEXTFRAG *f = first; f != NULL; f = f->pNext)
 \t\t\t\t{
 \t\t\t\t\tif (f->State.eAction == SPVA_Speak && f->ulTextLen > 0)
 \t\t\t\t\t{
+\t\t\t\t\t\t// Hosts (JAWS) put markup such as <bookmark/> between words and the space can be lost:
+\t\t\t\t\t\t// if something sat between two fragments, make sure a space separates them.
+\t\t\t\t\t\tif (n > 0 && f->pTextStart != prevEnd)
+\t\t\t\t\t\t{
+\t\t\t\t\t\t\tWCHAR a = buf[n - 1], b = f->pTextStart[0];
+\t\t\t\t\t\t\tbool aSp = (a == 0x20 || a == 0x09 || a == 0x0A || a == 0x0D || a == 0xA0);
+\t\t\t\t\t\t\tbool bSp = (b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D || b == 0xA0);
+\t\t\t\t\t\t\tif (!aSp && !bSp)
+\t\t\t\t\t\t\t\tbuf[n++] = 0x20;
+\t\t\t\t\t\t}
 \t\t\t\t\t\tmemcpy(buf + n, f->pTextStart, f->ulTextLen * sizeof(WCHAR));
 \t\t\t\t\t\tn += f->ulTextLen;
+\t\t\t\t\t\tprevEnd = f->pTextStart + f->ulTextLen;
 \t\t\t\t\t}
 \t\t\t\t\tif (f == last)
 \t\t\t\t\t\tbreak;
