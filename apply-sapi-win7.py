@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 """
-apply-sapi-win7.py -- Makes the SAPI5 build of espeak-ng 100% compatible with Windows 7
-even when compiled with modern Visual Studio 2022 / Windows 10+ SDK on GitHub Actions.
+apply-sapi-win7.py  --  run from the root of the espeak-ng source tree, AFTER apply-espeak-fix.py.
+
+Makes the SAPI5 build of espeak-ng usable on Windows 7 and fixes its speed/pitch/volume control:
+
+ 1. libespeak-ng.dll no longer uses pcaudiolib / XAudio2.  XAudio2 (xaudio2_8.dll / xaudio2_9.dll)
+    does not exist on Windows 7, so a DLL that links to it cannot even be loaded there.  SAPI engines
+    deliver audio to the host (JAWS, NVDA ...) through SAPI, so they do not need it at all.
+ 2. The C runtime is linked statically (/MT) so the DLL does not need the Visual C++ / Universal CRT
+    redistributables (which Windows 7 does not have by default).
+ 3. The SAPI engine (src/windows/com/ttsengine.cpp) now honours the host's speed, pitch and volume
+    (upstream ignores them, so the rate slider in JAWS / NVDA did nothing) and returns S_OK.
+
+Every edit must match exactly once, otherwise the script stops with an error and a non-zero exit code
+(so the GitHub Actions build fails visibly instead of silently building without the change).
 """
 import re
 import sys
@@ -10,7 +22,6 @@ from pathlib import Path
 VCXPROJ = Path("src/windows/libespeak-ng.vcxproj")
 TTS = Path("src/windows/com/ttsengine.cpp")
 TARGETS = Path("src/windows/Directory.Build.targets")
-PROPS = Path("src/windows/Directory.Build.props")
 
 
 def fail(msg):
@@ -20,8 +31,8 @@ def fail(msg):
 
 def read(p):
     if not p.exists():
-        fail(f"{p} not found -- run this from the espeak-ng source root")
-    data = p.read_bytes().decode("utf-8", errors="replace")
+        fail("%s not found -- run this from the espeak-ng source root" % p)
+    data = p.read_bytes().decode("utf-8")
     crlf = "\r\n" in data
     return data.replace("\r\n", "\n"), crlf
 
@@ -34,54 +45,55 @@ def write(p, text, crlf):
 
 def patch_vcxproj():
     text, crlf = read(VCXPROJ)
+    if "USE_LIBPCAUDIO=0" in text and "xaudio2.cpp" not in text:
+        print("vcxproj: already patched")
+        return
+    n = text.count("USE_LIBPCAUDIO=1")
+    if n < 1:
+        fail("USE_LIBPCAUDIO=1 not found in libespeak-ng.vcxproj (file layout changed)")
     text = text.replace("USE_LIBPCAUDIO=1", "USE_LIBPCAUDIO=0")
-    out = []
     removed = 0
+    out = []
     for line in text.split("\n"):
-        if re.search(r'pcaudiolib\\src\\(audio\.c|windows\.c|xaudio2\.cpp)', line, re.I):
+        if re.search(r'<ClCompile Include="\.\.\\pcaudiolib\\src\\(audio\.c|windows\.c|xaudio2\.cpp)"\s*/>', line):
             removed += 1
             continue
-        if re.search(r'<ProjectReference Include=".*pcaudiolib\.vcxproj"', line, re.I):
-            continue
         out.append(line)
+    if removed != 3:
+        fail("expected to remove 3 pcaudiolib source entries from libespeak-ng.vcxproj, removed %d" % removed)
     write(VCXPROJ, "\n".join(out), crlf)
-    print(f"vcxproj: pcaudiolib/XAudio2 disabled ({removed} source entries dropped)")
+    print("vcxproj: pcaudiolib/XAudio2 removed (%d defines switched, 3 sources dropped)" % n)
 
 
-def write_msbuild_overrides():
-    # Force latest installed VS toolset and Windows 10 SDK while targeting Windows 7 (0x0601)
-    props_xml = """<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <PropertyGroup>
-    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-  </PropertyGroup>
-</Project>
-"""
-    PROPS.write_text(props_xml, encoding="utf-8")
-
-    # Force static CRT (/MT), Windows 7 API level (_WIN32_WINNT=0x0601), and Subsystem 6.01
-    targets_xml = """<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <PropertyGroup>
-    <PlatformToolset Condition="'$(VisualStudioVersion)'=='17.0'">v143</PlatformToolset>
-    <PlatformToolset Condition="'$(VisualStudioVersion)'=='16.0'">v142</PlatformToolset>
-  </PropertyGroup>
+def write_targets():
+    # Imported automatically by MSBuild after each project's own settings: static CRT for Release.
+    xml = """<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
     <ClCompile>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <PreprocessorDefinitions>_WIN32_WINNT=0x0601;WINVER=0x0601;NTDDI_VERSION=0x06010000;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
-    <Link>
-      <MinimumRequiredVersion>6.01</MinimumRequiredVersion>
-      <SubSystem>Windows</SubSystem>
-    </Link>
   </ItemDefinitionGroup>
 </Project>
 """
-    TARGETS.write_text(targets_xml, encoding="utf-8")
-    print("MSBuild overrides written: Static CRT (/MT), Win7 API (0x0601), Subsystem 6.01")
+    TARGETS.write_text(xml, encoding="utf-8")
+    print("static CRT (/MT): %s written" % TARGETS)
 
+
+OLD_SPEAK = """\t\tcase SPVA_Speak:
+\t\t\tespeak_ng_Synthesize(textFragList->pTextStart, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
+\t\t\tbreak;
+\t\t}
+
+\t\ttextFragList = textFragList->pNext;
+\t}
+
+\treturn E_NOTIMPL;
+}"""
 
 NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t{
+\t\t\t// Honour the host's speed / pitch / volume (JAWS, NVDA ... send them per text fragment).
+\t\t\t// SAPI rate step: -10 .. +10, about 3x slower / 3x faster at the ends.
 \t\t\tint wpm = (int)(175.0 * pow(3.0, textFragList->State.RateAdj / 10.0) + 0.5);
 \t\t\tif (wpm < 80) wpm = 80;
 \t\t\tif (wpm > 450) wpm = 450;
@@ -112,29 +124,22 @@ def patch_tts():
     if "espeak_SetParameter(espeakRATE" in text:
         print("ttsengine.cpp: already patched")
         return
-
-    pattern = re.compile(
-        r"case\s+SPVA_Speak:\s*"
-        r"espeak_ng_Synthesize\([^;]+;\s*"
-        r"break;\s*\}\s*"
-        r"textFragList\s*=\s*textFragList->pNext;\s*\}\s*"
-        r"return\s+E_NOTIMPL;\s*\}",
-        re.DOTALL
-    )
-    if not pattern.search(text):
-        fail("Could not find the Speak() loop in ttsengine.cpp")
-
-    text = pattern.sub(NEW_SPEAK, text, count=1)
-    if "#include <math.h>" not in text:
-        text = "#include <math.h>\n" + text
-
+    if text.count(OLD_SPEAK) != 1:
+        fail("could not find the Speak() loop in ttsengine.cpp exactly once (found %d). "
+             "This espeak-ng version changed that code; the SAPI rate patch needs a small update."
+             % text.count(OLD_SPEAK))
+    text = text.replace(OLD_SPEAK, NEW_SPEAK)
+    inc = "#include <new>\n"
+    if text.count(inc) != 1:
+        fail("could not find '#include <new>' in ttsengine.cpp")
+    text = text.replace(inc, inc + "#include <math.h>\n")
     write(TTS, text, crlf)
     print("ttsengine.cpp: speed/pitch/volume support added, Speak() now returns S_OK")
 
 
 def main():
     patch_vcxproj()
-    write_msbuild_overrides()
+    write_targets()
     patch_tts()
     print("apply-sapi-win7: done")
 
