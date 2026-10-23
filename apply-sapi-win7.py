@@ -2,12 +2,13 @@
 """
 apply-sapi-win7.py  --  run from the root of the espeak-ng source tree, AFTER apply-espeak-fix.py.
 
-Makes the SAPI5 build of espeak-ng usable on Windows 7 and fixes NVDA / JAWS speech & spelling:
+Makes the SAPI5 build of espeak-ng usable on Windows 7 and fixes BOTH NVDA and JAWS speech & spelling:
  1. Removes pcaudiolib / XAudio2 dependency for Windows 7 compatibility.
  2. Links the C runtime statically (/MT).
  3. Honours SAPI5 rate, pitch, and volume controls.
- 4. Supports SPVA_SpellOut (fixes NVDA "Use spelling functionality if supported" option).
- 5. Properly handles SPVA_Bookmark events and avoids merging across bookmarks (fixes NVDA spell mode).
+ 4. Supports SPVA_SpellOut (fixes NVDA "Use spelling functionality if supported" option and JAWS spelling).
+ 5. Smoothly merges word fragments separated by bookmarks so JAWS reads sentences fluently without
+    pausing between words, while keeping single-character spelling distinct for NVDA.
 """
 import re
 import sys
@@ -94,23 +95,27 @@ NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t\tconst SPVTEXTFRAG *last = textFragList;
 \t\t\tsize_t total = first->ulTextLen + 1;
 
-\t\t\t// Only merge consecutive SPVA_Speak fragments if there are NO bookmarks between them
-\t\t\t// and they share identical voice state. Never merge SPVA_SpellOut fragments.
+\t\t\t// JAWS puts a <bookmark/> between EVERY word in a sentence!
+\t\t\t// If we don't merge across bookmarks during normal speech, eSpeak synthesizes each word
+\t\t\t// separately and pauses between every word like a beginner reader.
+\t\t\t// So we merge consecutive SPVA_Speak fragments (even across SPVA_Bookmark) as long as
+\t\t\t// they have the same voice state and are not a single-character spelling sequence.
 \t\t\tif (!isSpell)
 \t\t\t{
 \t\t\t\tfor (const SPVTEXTFRAG *f = first->pNext; f != NULL; f = f->pNext)
 \t\t\t\t{
-\t\t\t\t\tif (f->State.eAction == SPVA_Speak &&
-\t\t\t\t\t    f->State.RateAdj == first->State.RateAdj &&
-\t\t\t\t\t    f->State.Volume == first->State.Volume &&
-\t\t\t\t\t    f->State.EmphAdj == first->State.EmphAdj &&
-\t\t\t\t\t    f->State.PitchAdj.MiddleAdj == first->State.PitchAdj.MiddleAdj &&
-\t\t\t\t\t    f->State.PitchAdj.RangeAdj == first->State.PitchAdj.RangeAdj)
+\t\t\t\t\tif (f->State.eAction == SPVA_Speak)
 \t\t\t\t\t{
+\t\t\t\t\t\tif (!(f->State.RateAdj == first->State.RateAdj &&
+\t\t\t\t\t\t      f->State.Volume == first->State.Volume &&
+\t\t\t\t\t\t      f->State.EmphAdj == first->State.EmphAdj &&
+\t\t\t\t\t\t      f->State.PitchAdj.MiddleAdj == first->State.PitchAdj.MiddleAdj &&
+\t\t\t\t\t\t      f->State.PitchAdj.RangeAdj == first->State.PitchAdj.RangeAdj))
+\t\t\t\t\t\t\tbreak;
 \t\t\t\t\t\ttotal += f->ulTextLen + 1;
 \t\t\t\t\t\tlast = f;
 \t\t\t\t\t}
-\t\t\t\t\telse
+\t\t\t\t\telse if (f->State.eAction != SPVA_Bookmark)
 \t\t\t\t\t{
 \t\t\t\t\t\tbreak;
 \t\t\t\t\t}
@@ -146,7 +151,6 @@ NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t\t\t\tint chLen = 0;
 \t\t\t\t\tWCHAR c = first->pTextStart[i++];
 \t\t\t\t\tchBuf[chLen++] = c;
-\t\t\t\t\t// Handle UTF-16 surrogate pairs (e.g. emojis or rare symbols)
 \t\t\t\t\tif (c >= 0xD800 && c <= 0xDBFF && i < first->ulTextLen)
 \t\t\t\t\t{
 \t\t\t\t\t\tWCHAR c2 = first->pTextStart[i];
@@ -157,18 +161,9 @@ NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t\t\t\t\t}
 \t\t\t\t\t}
 \t\t\t\t\tchBuf[chLen] = 0;
-\t\t\t\t\tif (c == L' ' || c == L'\\t' || c == 0xA0)
-\t\t\t\t\t{
-\t\t\t\t\t\tespeak_SetParameter(espeakPUNCTUATION, espeakPUNCT_ALL, 0);
-\t\t\t\t\t\tespeak_ng_Synthesize(chBuf, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
-\t\t\t\t\t\tespeak_SetParameter(espeakPUNCTUATION, espeakPUNCT_NONE, 0);
-\t\t\t\t\t}
-\t\t\t\t\telse
-\t\t\t\t\t{
-\t\t\t\t\t\tespeak_SetParameter(espeakPUNCTUATION, espeakPUNCT_ALL, 0);
-\t\t\t\t\t\tespeak_ng_Synthesize(chBuf, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
-\t\t\t\t\t\tespeak_SetParameter(espeakPUNCTUATION, espeakPUNCT_NONE, 0);
-\t\t\t\t\t}
+\t\t\t\t\tespeak_SetParameter(espeakPUNCTUATION, espeakPUNCT_ALL, 0);
+\t\t\t\t\tespeak_ng_Synthesize(chBuf, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
+\t\t\t\t\tespeak_SetParameter(espeakPUNCTUATION, espeakPUNCT_NONE, 0);
 \t\t\t\t}
 \t\t\t}
 \t\t\telse
@@ -199,8 +194,28 @@ NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t\t\t\t}
 \t\t\t\t\tbuf[n] = 0;
 \t\t\t\t\tif (n > 0)
-\t\t\t\t\t\tespeak_ng_Synthesize(buf, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
+\t\t\t\t\t{
+\t\t\t\t\t\t// If it is a single character (punctuation/symbol navigation), read the symbol name
+\t\t\t\t\t\tif (n == 1 && !iswalnum(buf[0]))
+\t\t\t\t\t\t{
+\t\t\t\t\t\t\tespeak_SetParameter(espeakPUNCTUATION, espeakPUNCT_ALL, 0);
+\t\t\t\t\t\t\tespeak_ng_Synthesize(buf, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
+\t\t\t\t\t\t\tespeak_SetParameter(espeakPUNCTUATION, espeakPUNCT_NONE, 0);
+\t\t\t\t\t\t}
+\t\t\t\t\t\telse
+\t\t\t\t\t\t{
+\t\t\t\t\t\t\tespeak_ng_Synthesize(buf, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
+\t\t\t\t\t\t}
+\t\t\t\t\t}
 \t\t\t\t\tfree(buf);
+\t\t\t\t}
+\t\t\t\t// Fire any bookmarks that were inside the merged span so NVDA / JAWS stay in sync
+\t\t\t\tfor (const SPVTEXTFRAG *f = first; f != NULL; f = f->pNext)
+\t\t\t\t{
+\t\t\t\t\tif (f->State.eAction == SPVA_Bookmark)
+\t\t\t\t\t\tFireBookmark(f);
+\t\t\t\t\tif (f == last)
+\t\t\t\t\t\tbreak;
 \t\t\t\t}
 \t\t\t}
 \t\t\ttextFragList = last;
@@ -232,7 +247,7 @@ def patch_tts():
     inc = "#include <new>\n"
     if text.count(inc) != 1:
         fail("could not find '#include <new>' in ttsengine.cpp")
-    text = text.replace(inc, inc + "#include <math.h>\n#include <stdlib.h>\n#include <string.h>\n")
+    text = text.replace(inc, inc + "#include <math.h>\n#include <stdlib.h>\n#include <string.h>\n#include <wctype.h>\n")
 
     def once(old, new, what):
         nonlocal text
@@ -272,7 +287,7 @@ def patch_tts():
          "GetStringValue()")
 
     write(TTS, text, crlf)
-    print("ttsengine.cpp: speed/pitch/volume, SPVA_SpellOut, and SAPI bookmarks patched")
+    print("ttsengine.cpp: speed/pitch/volume, SPVA_SpellOut, JAWS word-merging, and SAPI bookmarks patched")
 
 
 def main():
