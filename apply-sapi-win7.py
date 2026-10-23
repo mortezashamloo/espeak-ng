@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
 """
 apply-sapi-win7.py  --  run from the root of the espeak-ng source tree, AFTER apply-espeak-fix.py.
-
-Makes the SAPI5 build of espeak-ng usable on Windows 7 and fixes its speed/pitch/volume control:
-
- 1. libespeak-ng.dll no longer uses pcaudiolib / XAudio2.  XAudio2 (xaudio2_8.dll / xaudio2_9.dll)
-    does not exist on Windows 7, so a DLL that links to it cannot even be loaded there.  SAPI engines
-    deliver audio to the host (JAWS, NVDA ...) through SAPI, so they do not need it at all.
- 2. The C runtime is linked statically (/MT) so the DLL does not need the Visual C++ / Universal CRT
-    redistributables (which Windows 7 does not have by default).
- 3. The SAPI engine (src/windows/com/ttsengine.cpp) now honours the host's speed, pitch and volume
-    (upstream ignores them, so the rate slider in JAWS / NVDA did nothing) and returns S_OK.
-
-Every edit must match exactly once, otherwise the script stops with an error and a non-zero exit code
-(so the GitHub Actions build fails visibly instead of silently building without the change).
 """
 import re
 import sys
@@ -55,7 +42,7 @@ def patch_vcxproj():
     removed = 0
     out = []
     for line in text.split("\n"):
-        if re.search(r'<ClCompile Include="\.\.\\pcaudiolib\\src\\(audio\.c|windows\.c|xaudio2\.cpp)"\s*/>', line):
+        if re.search(r'<ClCompile Include="\.\.\pcaudiolib\src\(audio\.c|windows\.c|xaudio2\.cpp)"\s*/>', line):
             removed += 1
             continue
         out.append(line)
@@ -66,7 +53,6 @@ def patch_vcxproj():
 
 
 def write_targets():
-    # Imported automatically by MSBuild after each project's own settings: static CRT for Release.
     xml = """<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
     <ClCompile>
@@ -93,7 +79,6 @@ OLD_SPEAK = """\t\tcase SPVA_Speak:
 NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t{
 \t\t\t// Honour the host's speed / pitch / volume (JAWS, NVDA ... send them per text fragment).
-\t\t\t// SAPI rate step: -10 .. +10, about 3x slower / 3x faster at the ends.
 \t\t\tint wpm = (int)(175.0 * pow(3.0, textFragList->State.RateAdj / 10.0) + 0.5);
 \t\t\tif (wpm < 80) wpm = 80;
 \t\t\tif (wpm > 450) wpm = 450;
@@ -125,9 +110,7 @@ def patch_tts():
         print("ttsengine.cpp: already patched")
         return
     if text.count(OLD_SPEAK) != 1:
-        fail("could not find the Speak() loop in ttsengine.cpp exactly once (found %d). "
-             "This espeak-ng version changed that code; the SAPI rate patch needs a small update."
-             % text.count(OLD_SPEAK))
+        fail("could not find the Speak() loop in ttsengine.cpp exactly once (found %d)." % text.count(OLD_SPEAK))
     text = text.replace(OLD_SPEAK, NEW_SPEAK)
     inc = "#include <new>\n"
     if text.count(inc) != 1:
