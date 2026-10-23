@@ -2,6 +2,11 @@ name: windows-sapi
 
 on:
   workflow_dispatch:
+    inputs:
+      bookmark_events:
+        description: "Experimental: also report SAPI bookmark events (for NVDA). Leave OFF for the normal JAWS build."
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -33,7 +38,7 @@ jobs:
 
       - name: Apply Windows 7 / SAPI5 changes
         shell: pwsh
-        run: python apply-sapi-win7.py
+        run: python apply-sapi-win7.py ${{ inputs.bookmark_events && '--bookmark-events' || '' }}
 
       - name: Build x86
         continue-on-error: true   # the MSI step at the end of the solution may fail; the DLL check below decides
@@ -70,5 +75,5 @@ jobs:
       - name: Upload SAPI5 package
         uses: actions/upload-artifact@v7
         with:
-          name: espeak-ng-sapi5-win7
+          name: espeak-ng-sapi5-win7${{ inputs.bookmark_events && '-bookmarks' || '' }}
           path: "espeak-ng-sapi/"
