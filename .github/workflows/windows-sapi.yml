@@ -10,10 +10,19 @@ jobs:
 
     steps:
       - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Install Windows 8.1 SDK
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Method Get -Uri https://go.microsoft.com/fwlink/p/?LinkId=323507 -OutFile sdksetup.exe -UseBasicParsing
+          Start-Process -Wait sdksetup.exe -ArgumentList "/q", "/norestart", "/features", "OptionId.WindowsDesktopSoftwareDevelopmentKit", "OptionId.NetFxSoftwareDevelopmentKit"
+
+      - name: Install WiX
+        run: dotnet tool install --global wix
 
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pefile
         run: pip install pefile
@@ -26,21 +35,21 @@ jobs:
         shell: pwsh
         run: python apply-sapi-win7.py
 
-      - name: Build x86 SAPI5 DLL
+      - name: Build x86
+        continue-on-error: true   # the MSI step at the end of the solution may fail; the DLL check below decides
         working-directory: "src/windows"
         shell: pwsh
-        run: msbuild libespeak-ng.vcxproj /p:Configuration=Release /p:Platform=x86
+        run: msbuild espeak-ng.sln /p:Configuration=Release /p:Platform=x86
 
       - name: Check and collect x86 DLL
         shell: pwsh
         run: python check-win7-imports.py x86 espeak-ng-sapi/x86
 
-      - name: Build x64 SAPI5 DLL and espeak-ng-data
+      - name: Build x64
+        continue-on-error: true   # the MSI step at the end of the solution may fail; the DLL check below decides
         working-directory: "src/windows"
         shell: pwsh
-        run: |
-          msbuild libespeak-ng.vcxproj /p:Configuration=Release /p:Platform=x64
-          msbuild espeak-ng-data.vcxproj /p:Configuration=Release /p:Platform=x64
+        run: msbuild espeak-ng.sln /p:Configuration=Release /p:Platform=x64
 
       - name: Check and collect x64 DLL
         shell: pwsh
@@ -49,15 +58,17 @@ jobs:
       - name: Assemble package
         shell: pwsh
         run: |
-          if (-not (Test-Path "espeak-ng-data/phontab")) {
-            throw "espeak-ng-data was not built properly"
-          }
+          if (-not (Test-Path "espeak-ng-data/phontab")) { throw "espeak-ng-data was not built" }
           Copy-Item "espeak-ng-data" -Destination "espeak-ng-sapi/espeak-ng-data" -Recurse -Force
-          Copy-Item "install-sapi.bat" -Destination "espeak-ng-sapi/" -Force
-          Copy-Item "uninstall-sapi.bat" -Destination "espeak-ng-sapi/" -Force
+          foreach ($n in "install-sapi.bat", "uninstall-sapi.bat") {
+            $f = Get-ChildItem -Path . -Recurse -Filter $n -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\espeak-ng-sapi\\' } | Select-Object -First 1
+            if (-not $f) { throw "$n is not in the repository. Upload it to the repo (any folder) and run again." }
+            Write-Host "using $($f.FullName)"
+            Copy-Item $f.FullName -Destination "espeak-ng-sapi/" -Force
+          }
 
       - name: Upload SAPI5 package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: espeak-ng-sapi5-win7
           path: "espeak-ng-sapi/"
