@@ -269,7 +269,7 @@ def patch_tts():
          "{\n"
          "\tif (!site || !f->pTextStart || f->ulTextLen == 0)\n"
          "\t\treturn;\n"
-         "\tWCHAR *mark = (WCHAR *)CoTaskMemAlloc((f->ulTextLen + 1) * sizeof(WCHAR));\n"
+         "\tWCHAR *mark = (WCHAR *)malloc((f->ulTextLen + 1) * sizeof(WCHAR));\n"
          "\tif (!mark)\n"
          "\t\treturn;\n"
          "\tmemcpy(mark, f->pTextStart, f->ulTextLen * sizeof(WCHAR));\n"
@@ -282,6 +282,7 @@ def patch_tts():
          "\tev.wParam = (WPARAM)_wtol(mark);\n"
          "\tev.lParam = (LPARAM)mark;\n"
          "\tsite->AddEvents(&ev, 1);\n"
+         "\tfree(mark);   // SAPI copies the string; without this every bookmark leaks memory\n"
          "}\n\n"
          "HRESULT TtsEngine::GetStringValue(LPCWSTR key, char *&value)\n{",
          "GetStringValue()")
