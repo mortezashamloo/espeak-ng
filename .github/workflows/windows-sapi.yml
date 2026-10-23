@@ -10,19 +10,10 @@ jobs:
 
     steps:
       - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v3
-
-      - name: Install Windows 8.1 SDK
-        shell: powershell
-        run: |
-          Invoke-WebRequest -Method Get -Uri https://go.microsoft.com/fwlink/p/?LinkId=323507 -OutFile sdksetup.exe -UseBasicParsing
-          Start-Process -Wait sdksetup.exe -ArgumentList "/q", "/norestart", "/features", "OptionId.WindowsDesktopSoftwareDevelopmentKit", "OptionId.NetFxSoftwareDevelopmentKit"
-
-      - name: Install WiX
-        run: dotnet tool install --global wix
+        uses: microsoft/setup-msbuild@v2
 
       - name: Checkout repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Install pefile
         run: pip install pefile
@@ -35,36 +26,40 @@ jobs:
         shell: pwsh
         run: python apply-sapi-win7.py
 
-      - name: Build x86
-        continue-on-error: true   # the MSI step at the end of the solution may fail; the DLL check below decides
+      - name: Build x86 SAPI5 DLL
         working-directory: "src/windows"
         shell: pwsh
-        run: msbuild espeak-ng.sln /p:Configuration=Release /p:Platform=x86
+        run: msbuild libespeak-ng.vcxproj /p:Configuration=Release /p:Platform=x86
 
       - name: Check and collect x86 DLL
         shell: pwsh
         run: python check-win7-imports.py x86 espeak-ng-sapi/x86
 
-      - name: Build x64
-        continue-on-error: true   # the MSI step at the end of the solution may fail; the DLL check below decides
+      - name: Build x64 SAPI5 DLL
         working-directory: "src/windows"
         shell: pwsh
-        run: msbuild espeak-ng.sln /p:Configuration=Release /p:Platform=x64
+        run: msbuild libespeak-ng.vcxproj /p:Configuration=Release /p:Platform=x64
 
       - name: Check and collect x64 DLL
         shell: pwsh
         run: python check-win7-imports.py x64 espeak-ng-sapi/x64
 
+      - name: Build espeak-ng-data (Persian & English dictionaries)
+        shell: pwsh
+        run: |
+          cmake -B build-data -DBUILD_SHARED_LIBS=OFF -DUSE_ASYNC=OFF -DUSE_MBROLA=OFF -DUSE_LIBSONIC=OFF -DUSE_LIBPCAUDIO=OFF -DCOMPILE_INTONATIONS=ON
+          cmake --build build-data --config Release --target data
+
       - name: Assemble package
         shell: pwsh
         run: |
-          if (-not (Test-Path "espeak-ng-data/phontab")) { throw "espeak-ng-data was not built" }
-          Copy-Item "espeak-ng-data" -Destination "espeak-ng-sapi/espeak-ng-data" -Recurse -Force
+          $dataPath = if (Test-Path "build-data/espeak-ng-data/phontab") { "build-data/espeak-ng-data" } elseif (Test-Path "espeak-ng-data/phontab") { "espeak-ng-data" } else { throw "espeak-ng-data was not built" }
+          Copy-Item $dataPath -Destination "espeak-ng-sapi/espeak-ng-data" -Recurse -Force
           Copy-Item "install-sapi.bat" -Destination "espeak-ng-sapi/" -Force
           Copy-Item "uninstall-sapi.bat" -Destination "espeak-ng-sapi/" -Force
 
       - name: Upload SAPI5 package
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: espeak-ng-sapi5-win7
           path: "espeak-ng-sapi/"
