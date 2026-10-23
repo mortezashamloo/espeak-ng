@@ -10,7 +10,8 @@ Makes the SAPI5 build of espeak-ng usable on Windows 7 and fixes its speed/pitch
  2. The C runtime is linked statically (/MT) so the DLL does not need the Visual C++ / Universal CRT
     redistributables (which Windows 7 does not have by default).
  3. The SAPI engine (src/windows/com/ttsengine.cpp) now honours the host's speed, pitch and volume
-    (upstream ignores them, so the rate slider in JAWS / NVDA did nothing) and returns S_OK.
+    (upstream ignores them, so the rate slider in JAWS / NVDA did nothing), speaks only the text of each
+    fragment (upstream also read the host's trailing XML aloud) and returns S_OK.
 
 Every edit must match exactly once, otherwise the script stops with an error and a non-zero exit code
 (so the GitHub Actions build fails visibly instead of silently building without the change).
@@ -105,7 +106,21 @@ NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t\tespeak_SetParameter(espeakRATE, wpm, 0);
 \t\t\tespeak_SetParameter(espeakPITCH, pitch, 0);
 \t\t\tespeak_SetParameter(espeakVOLUME, volume, 0);
-\t\t\tespeak_ng_Synthesize(textFragList->pTextStart, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
+\t\t\t// Speak ONLY this fragment. pTextStart points into the host's whole text, so passing it
+\t\t\t// with length 0 would read everything after it too -- including the host's XML such as
+\t\t\t// <bookmark mark="123"/> ("computer, less than bookmark mark one two three").
+\t\t\tULONG fragLen = textFragList->ulTextLen;
+\t\t\tif (fragLen > 0)
+\t\t\t{
+\t\t\t\tWCHAR *frag = (WCHAR *)malloc((fragLen + 1) * sizeof(WCHAR));
+\t\t\t\tif (frag)
+\t\t\t\t{
+\t\t\t\t\tmemcpy(frag, textFragList->pTextStart, fragLen * sizeof(WCHAR));
+\t\t\t\t\tfrag[fragLen] = 0;
+\t\t\t\t\tespeak_ng_Synthesize(frag, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
+\t\t\t\t\tfree(frag);
+\t\t\t\t}
+\t\t\t}
 \t\t\tbreak;
 \t\t}
 \t\tdefault:
@@ -132,7 +147,7 @@ def patch_tts():
     inc = "#include <new>\n"
     if text.count(inc) != 1:
         fail("could not find '#include <new>' in ttsengine.cpp")
-    text = text.replace(inc, inc + "#include <math.h>\n")
+    text = text.replace(inc, inc + "#include <math.h>\n#include <stdlib.h>\n#include <string.h>\n")
     write(TTS, text, crlf)
     print("ttsengine.cpp: speed/pitch/volume support added, Speak() now returns S_OK")
 
