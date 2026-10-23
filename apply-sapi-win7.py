@@ -15,6 +15,10 @@ Makes the SAPI5 build of espeak-ng usable on Windows 7 and fixes its speed/pitch
     the host's rate setting too (upstream also read the host's trailing XML aloud, and per-fragment
     calls pause after every word) and returns S_OK.
 
+Optional (experimental, off by default):  python apply-sapi-win7.py --bookmark-events
+    The engine then also reports SAPI bookmark events (NVDA uses them to follow its speech).  Leave it off
+    for the normal JAWS build.
+
 Every edit must match exactly once, otherwise the script stops with an error and a non-zero exit code
 (so the GitHub Actions build fails visibly instead of silently building without the change).
 """
@@ -203,10 +207,74 @@ def patch_tts():
     print("ttsengine.cpp: speed/pitch/volume support added, Speak() now returns S_OK")
 
 
+def patch_bookmarks():
+    text, crlf = read(TTS)
+    if "FireBookmark" in text:
+        print("ttsengine.cpp: bookmark events already patched")
+        return
+
+    def once(old, new, what):
+        nonlocal text
+        if text.count(old) != 1:
+            fail("bookmark patch: could not find %s exactly once (found %d)" % (what, text.count(old)))
+        text = text.replace(old, new)
+
+    once("\tISpObjectToken *objectToken;\n\tISpTTSEngineSite *site;\n};",
+         "\tISpObjectToken *objectToken;\n\tISpTTSEngineSite *site;\n\tULONGLONG audioBytes;\n\tvoid FireBookmark(const SPVTEXTFRAG *f);\n};",
+         "the end of the TtsEngine class")
+    once("\tthis->site = site;\n\n\twhile (textFragList != NULL)",
+         "\tthis->site = site;\n\taudioBytes = 0;\n\n\twhile (textFragList != NULL)",
+         "the start of Speak()")
+    once("\t\t\ttextFragList = last;   // the loop below then moves on to last->pNext",
+         "\t\t\t// Bookmarks that sat between the joined fragments are reported after their text.\n"
+         "\t\t\tfor (const SPVTEXTFRAG *f = first; f != NULL; f = f->pNext)\n"
+         "\t\t\t{\n"
+         "\t\t\t\tif (f->State.eAction == SPVA_Bookmark)\n"
+         "\t\t\t\t\tFireBookmark(f);\n"
+         "\t\t\t\tif (f == last)\n"
+         "\t\t\t\t\tbreak;\n"
+         "\t\t\t}\n"
+         "\t\t\ttextFragList = last;   // the loop below then moves on to last->pNext",
+         "the end of the speak case")
+    once("\t\tdefault:\n\t\t\tbreak;\n\t\t}\n\n\t\ttextFragList = textFragList->pNext;",
+         "\t\tcase SPVA_Bookmark:\n\t\t\tFireBookmark(textFragList);\n\t\t\tbreak;\n"
+         "\t\tdefault:\n\t\t\tbreak;\n\t\t}\n\n\t\ttextFragList = textFragList->pNext;",
+         "the end of the action switch")
+    once("\tif (data)\n\t\tsite->Write(data, samples * 2, NULL);\n\treturn 0;",
+         "\tif (data)\n\t{\n\t\tsite->Write(data, samples * 2, NULL);\n\t\taudioBytes += (ULONGLONG)samples * 2;\n\t}\n\treturn 0;",
+         "OnEvent()")
+    once("HRESULT TtsEngine::GetStringValue(LPCWSTR key, char *&value)\n{",
+         "void TtsEngine::FireBookmark(const SPVTEXTFRAG *f)\n"
+         "{\n"
+         "\tif (!site || !f->pTextStart || f->ulTextLen == 0)\n"
+         "\t\treturn;\n"
+         "\tWCHAR *mark = (WCHAR *)malloc((f->ulTextLen + 1) * sizeof(WCHAR));\n"
+         "\tif (!mark)\n"
+         "\t\treturn;\n"
+         "\tmemcpy(mark, f->pTextStart, f->ulTextLen * sizeof(WCHAR));\n"
+         "\tmark[f->ulTextLen] = 0;\n"
+         "\tSPEVENT ev;\n"
+         "\tmemset(&ev, 0, sizeof(ev));\n"
+         "\tev.eEventId = SPEI_TTS_BOOKMARK;\n"
+         "\tev.elParamType = SPET_LPARAM_IS_STRING;\n"
+         "\tev.ullAudioStreamOffset = audioBytes;\n"
+         "\tev.wParam = (WPARAM)_wtol(mark);\n"
+         "\tev.lParam = (LPARAM)mark;\n"
+         "\tsite->AddEvents(&ev, 1);\n"
+         "\tfree(mark);\n"
+         "}\n\n"
+         "HRESULT TtsEngine::GetStringValue(LPCWSTR key, char *&value)\n{",
+         "GetStringValue()")
+    write(TTS, text, crlf)
+    print("ttsengine.cpp: EXPERIMENTAL bookmark events added")
+
+
 def main():
     patch_vcxproj()
     write_targets()
     patch_tts()
+    if "--bookmark-events" in sys.argv:
+        patch_bookmarks()
     print("apply-sapi-win7: done")
 
 
