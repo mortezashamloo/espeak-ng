@@ -35,26 +35,24 @@ jobs:
         shell: pwsh
         run: python check-win7-imports.py x86 espeak-ng-sapi/x86
 
-      - name: Build x64 SAPI5 DLL
+      - name: Build x64 SAPI5 DLL and espeak-ng-data
         working-directory: "src/windows"
         shell: pwsh
-        run: msbuild libespeak-ng.vcxproj /p:Configuration=Release /p:Platform=x64
+        run: |
+          msbuild libespeak-ng.vcxproj /p:Configuration=Release /p:Platform=x64
+          msbuild espeak-ng-data.vcxproj /p:Configuration=Release /p:Platform=x64
 
       - name: Check and collect x64 DLL
         shell: pwsh
         run: python check-win7-imports.py x64 espeak-ng-sapi/x64
 
-      - name: Build espeak-ng-data (Persian & English dictionaries)
-        shell: pwsh
-        run: |
-          cmake -B build-data -DBUILD_SHARED_LIBS=OFF -DUSE_ASYNC=OFF -DUSE_MBROLA=OFF -DUSE_LIBSONIC=OFF -DUSE_LIBPCAUDIO=OFF -DCOMPILE_INTONATIONS=ON
-          cmake --build build-data --config Release --target data
-
       - name: Assemble package
         shell: pwsh
         run: |
-          $dataPath = if (Test-Path "build-data/espeak-ng-data/phontab") { "build-data/espeak-ng-data" } elseif (Test-Path "espeak-ng-data/phontab") { "espeak-ng-data" } else { throw "espeak-ng-data was not built" }
-          Copy-Item $dataPath -Destination "espeak-ng-sapi/espeak-ng-data" -Recurse -Force
+          if (-not (Test-Path "espeak-ng-data/phontab")) {
+            throw "espeak-ng-data was not built properly"
+          }
+          Copy-Item "espeak-ng-data" -Destination "espeak-ng-sapi/espeak-ng-data" -Recurse -Force
           Copy-Item "install-sapi.bat" -Destination "espeak-ng-sapi/" -Force
           Copy-Item "uninstall-sapi.bat" -Destination "espeak-ng-sapi/" -Force
 
