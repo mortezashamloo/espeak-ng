@@ -10,8 +10,9 @@ Makes the SAPI5 build of espeak-ng usable on Windows 7 and fixes its speed/pitch
  2. The C runtime is linked statically (/MT) so the DLL does not need the Visual C++ / Universal CRT
     redistributables (which Windows 7 does not have by default).
  3. The SAPI engine (src/windows/com/ttsengine.cpp) now honours the host's speed, pitch and volume
-    (upstream ignores them, so the rate slider in JAWS / NVDA did nothing), speaks only the text of each
-    fragment (upstream also read the host's trailing XML aloud) and returns S_OK.
+    (upstream ignores them, so the rate slider in JAWS / NVDA did nothing), speaks only the text of the
+    fragments, joined into one call (upstream also read the host's trailing XML aloud, and per-fragment
+    calls pause after every word) and returns S_OK.
 
 Every edit must match exactly once, otherwise the script stops with an error and a non-zero exit code
 (so the GitHub Actions build fails visibly instead of silently building without the change).
@@ -93,34 +94,64 @@ OLD_SPEAK = """\t\tcase SPVA_Speak:
 
 NEW_SPEAK = """\t\tcase SPVA_Speak:
 \t\t{
-\t\t\t// Honour the host's speed / pitch / volume (JAWS, NVDA ... send them per text fragment).
+\t\t\t// Join this fragment with the speak-fragments that follow it when they have the same
+\t\t\t// speed / pitch / volume, and speak them in ONE call. Some hosts / SAPI versions cut the text into
+\t\t\t// many small fragments; speaking them one by one makes a pause after every word.
+\t\t\t// Only the text of the fragments is spoken (never the host's XML around it).
+\t\t\tconst SPVTEXTFRAG *first = textFragList;
+\t\t\tconst SPVTEXTFRAG *last = textFragList;
+\t\t\tsize_t total = 0;
+\t\t\tfor (const SPVTEXTFRAG *f = first; f != NULL; f = f->pNext)
+\t\t\t{
+\t\t\t\tif (f->State.eAction == SPVA_Speak)
+\t\t\t\t{
+\t\t\t\t\tif (f != first && !(f->State.RateAdj == first->State.RateAdj
+\t\t\t\t\t                 && f->State.Volume == first->State.Volume
+\t\t\t\t\t                 && f->State.EmphAdj == first->State.EmphAdj
+\t\t\t\t\t                 && f->State.PitchAdj.MiddleAdj == first->State.PitchAdj.MiddleAdj
+\t\t\t\t\t                 && f->State.PitchAdj.RangeAdj == first->State.PitchAdj.RangeAdj))
+\t\t\t\t\t\tbreak;
+\t\t\t\t\ttotal += f->ulTextLen;
+\t\t\t\t\tlast = f;
+\t\t\t\t}
+\t\t\t\telse if (f->State.eAction != SPVA_Bookmark)
+\t\t\t\t\tbreak;
+\t\t\t}
+
+\t\t\t// Honour the host's speed / pitch / volume (JAWS, NVDA ... send them with the text).
 \t\t\t// SAPI rate step: -10 .. +10, about 3x slower / 3x faster at the ends.
-\t\t\tint wpm = (int)(175.0 * pow(3.0, textFragList->State.RateAdj / 10.0) + 0.5);
+\t\t\tint wpm = (int)(175.0 * pow(3.0, first->State.RateAdj / 10.0) + 0.5);
 \t\t\tif (wpm < 80) wpm = 80;
 \t\t\tif (wpm > 450) wpm = 450;
-\t\t\tint pitch = 50 + (int)textFragList->State.PitchAdj.MiddleAdj * 5;
+\t\t\tint pitch = 50 + (int)first->State.PitchAdj.MiddleAdj * 5;
 \t\t\tif (pitch < 0) pitch = 0;
 \t\t\tif (pitch > 100) pitch = 100;
-\t\t\tint volume = (int)textFragList->State.Volume;
+\t\t\tint volume = (int)first->State.Volume;
 \t\t\tif (volume > 200) volume = 200;
 \t\t\tespeak_SetParameter(espeakRATE, wpm, 0);
 \t\t\tespeak_SetParameter(espeakPITCH, pitch, 0);
 \t\t\tespeak_SetParameter(espeakVOLUME, volume, 0);
-\t\t\t// Speak ONLY this fragment. pTextStart points into the host's whole text, so passing it
-\t\t\t// with length 0 would read everything after it too -- including the host's XML such as
-\t\t\t// <bookmark mark="123"/> ("computer, less than bookmark mark one two three").
-\t\t\tULONG fragLen = textFragList->ulTextLen;
-\t\t\tif (fragLen > 0)
+
+\t\t\tWCHAR *buf = (WCHAR *)malloc((total + 1) * sizeof(WCHAR));
+\t\t\tif (buf)
 \t\t\t{
-\t\t\t\tWCHAR *frag = (WCHAR *)malloc((fragLen + 1) * sizeof(WCHAR));
-\t\t\t\tif (frag)
+\t\t\t\tsize_t n = 0;
+\t\t\t\tfor (const SPVTEXTFRAG *f = first; f != NULL; f = f->pNext)
 \t\t\t\t{
-\t\t\t\t\tmemcpy(frag, textFragList->pTextStart, fragLen * sizeof(WCHAR));
-\t\t\t\t\tfrag[fragLen] = 0;
-\t\t\t\t\tespeak_ng_Synthesize(frag, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
-\t\t\t\t\tfree(frag);
+\t\t\t\t\tif (f->State.eAction == SPVA_Speak && f->ulTextLen > 0)
+\t\t\t\t\t{
+\t\t\t\t\t\tmemcpy(buf + n, f->pTextStart, f->ulTextLen * sizeof(WCHAR));
+\t\t\t\t\t\tn += f->ulTextLen;
+\t\t\t\t\t}
+\t\t\t\t\tif (f == last)
+\t\t\t\t\t\tbreak;
 \t\t\t\t}
+\t\t\t\tbuf[n] = 0;
+\t\t\t\tif (n > 0)
+\t\t\t\t\tespeak_ng_Synthesize(buf, 0, 0, POS_CHARACTER, 0, espeakCHARS_WCHAR, NULL, this);
+\t\t\t\tfree(buf);
 \t\t\t}
+\t\t\ttextFragList = last;   // the loop below then moves on to last->pNext
 \t\t\tbreak;
 \t\t}
 \t\tdefault:
