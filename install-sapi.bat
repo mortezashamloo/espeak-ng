@@ -42,6 +42,8 @@ call :clsid "%R32%" "%DEST%\x86\libespeak-ng.dll"
 if defined IS64 call :clsid /reg:64 "%DEST%\x64\libespeak-ng.dll"
 
 echo Registering voices ...
+rem   :voice  <espeak voice name>  <Windows language id in hex>  <display name>
+rem   To add a voice, copy one of the two lines below and change it.
 call :voice fa 429 Persian
 call :voice en-us 409 English-US
 
