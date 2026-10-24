@@ -35,6 +35,10 @@ jobs:
         shell: pwsh
         run: python apply-sapi-win7.py
 
+      - name: Apply SAPI5 changes to the MSI installer
+        shell: pwsh
+        run: python apply-sapi-msi.py
+
       - name: Build x86
         continue-on-error: true
         working-directory: "src/windows"
@@ -66,6 +70,15 @@ jobs:
             Write-Host "using $($f.FullName)"
             Copy-Item $f.FullName -Destination "espeak-ng-sapi/" -Force
           }
+
+      - name: Collect MSI installers (32-bit and 64-bit)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "espeak-ng-sapi/msi" | Out-Null
+          $x86 = "src/windows/installer/bin/Release/espeak-ng.msi"
+          $x64 = "src/windows/installer/bin/x64/Release/espeak-ng.msi"
+          if (Test-Path $x86) { Copy-Item $x86 "espeak-ng-sapi/msi/espeak-ng-x86.msi" } else { Write-Warning "32-bit MSI was not built (see the Build x86 step)" }
+          if (Test-Path $x64) { Copy-Item $x64 "espeak-ng-sapi/msi/espeak-ng-x64.msi" } else { Write-Warning "64-bit MSI was not built (see the Build x64 step)" }
 
       - name: Upload SAPI5 package
         uses: actions/upload-artifact@v7
