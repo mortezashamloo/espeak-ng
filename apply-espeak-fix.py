@@ -16,6 +16,13 @@ fallback language is English, it:
   * turns on dictionary rule conditions 3 and 6 (the same ones voices/en-us uses: `dictrules 3 6`).
 Every other language keeps upstream behaviour.
 
+The accent is a CHOICE: the environment variable ESPEAK_FA_ENGLISH selects it each time an English word is
+met in Persian text:
+    us  (or unset) -- American accent (the default of this fix)
+    uk             -- the British accent, exactly as upstream espeak-ng does it
+On Android the eSpeak app gets a setting "English words in Persian text" (American / British) that sets it
+before every speech; on Windows/Linux set the variable yourself.
+
 It ALSO makes the build read your own `dictsource/<lang>_extra` files (always on, e.g. `fa_extra`).
 The stock CMake data build (used by the Android build) copies only `_rules`, `_list`, `_listx` and
 `_emoji` into its temporary dictionary folder, so a `fa_extra` file was silently ignored.  This adds
@@ -47,6 +54,29 @@ MARKER = "Persian (fa): English fallback with American accent"
 EMOJI_MARKER = "Persian (fa): emoji mode (ESPEAK_FA_EMOJI"
 OLD_EMOJI_MARKER = "Persian (fa): emoji are silent"
 EMOJI_HELPER_MARKER = "FaEmojiMode(void)"
+ACCENT_HELPER_MARKER = "FaEnglishUk(void)"
+
+# runtime switch for the accent, placed before TranslateWord2 (which uses it)
+ACCENT_HELPER = """\
+// Persian (fa): accent of English words.  ESPEAK_FA_ENGLISH = "uk" (or "UK") gives the British accent (upstream
+// behaviour); anything else, or unset, gives the American accent.  The Android app sets it from its settings.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+static int FaEnglishUk(void)
+{
+\tconst char *v = getenv("ESPEAK_FA_ENGLISH");
+\treturn (v != NULL && (v[0] == 'u' || v[0] == 'U') && (v[1] == 'k' || v[1] == 'K') && v[2] == 0) ? 1 : 0;
+}
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+"""
+OLD_COND = '(strcmp(new_language, "en") == 0 || strcmp(new_language, "EN") == 0)) {'
+NEW_COND = '(strcmp(new_language, "en") == 0 || strcmp(new_language, "EN") == 0) && !FaEnglishUk()) {'
+
 
 EMOJI_HELPERS = """\
 // Persian (fa): emoji mode helpers.  Mode: 0 = read all emoji (upstream), 1 = flags only, 2 = silent.
@@ -104,8 +134,9 @@ NEW_BLOCK = """\
 {ind}// Use translator "en" (correct English langopts + en_dict +
 {ind}// acronym/unpronounceable handling) then switch phoneme table
 {ind}// to en-us and enable General American dictrules 3 and 6.
+{ind}// (ESPEAK_FA_ENGLISH=uk skips this and keeps the upstream British accent.)
 {ind}if (translator != NULL && translator->translator_name == L('f', 'a') &&
-{ind}    (strcmp(new_language, "en") == 0 || strcmp(new_language, "EN") == 0)) {{
+{ind}    (strcmp(new_language, "en") == 0 || strcmp(new_language, "EN") == 0) && !FaEnglishUk()) {{
 {ind}\tswitch_phonemes = SetTranslator2("en");
 {ind}\tif (switch_phonemes >= 0 && translator2 != NULL) {{
 {ind}\t\ttranslator2->dict_condition |= (1 << 3) | (1 << 6);
@@ -174,8 +205,11 @@ def main():
 
     silence_emoji = "--no-emoji" in sys.argv
     if MARKER in text:
-        print("accent fix: already patched")
-        new_text = text
+        if ACCENT_HELPER_MARKER in text:
+            print("accent fix: already patched")
+            new_text = text
+        else:
+            new_text = upgrade_accent(text)
     else:
         new_text = apply_accent(text)
     if silence_emoji:
@@ -190,6 +224,7 @@ def main():
         print("translate.c written")
     if silence_emoji:
         patch_android_emoji_setting()
+    patch_android_accent_setting()
 
 
 def apply_accent(text):
@@ -217,8 +252,30 @@ def apply_accent(text):
         if sym not in new_text:
             fail("symbol `%s` not found in translate.c; this version changed -- fix needs an update." % sym)
 
-    print("accent fix: patched OK (Persian text reads English words with the American accent)")
+    new_text = add_accent_helper(new_text)
+    print("accent fix: patched OK (English words in Persian text: American accent, ESPEAK_FA_ENGLISH=uk for British)")
     return new_text
+
+
+def add_accent_helper(text):
+    if ACCENT_HELPER_MARKER in text:
+        return text
+    anchor = re.compile(r"^static int TranslateWord2\(", re.M)
+    am = list(anchor.finditer(text))
+    if len(am) != 1:
+        fail("could not find `static int TranslateWord2(` in translate.c (found %d). This espeak-ng version "
+             "changed that code; the accent choice needs a small update." % len(am))
+    return text[:am[0].start()] + ACCENT_HELPER + text[am[0].start():]
+
+
+def upgrade_accent(text):
+    """translate.c already has the American-accent block from an older run: make it switchable."""
+    if text.count(OLD_COND) != 1:
+        fail("the American-accent block is in translate.c but its condition could not be found exactly once "
+             "(found %d). Start from a clean translate.c (Sync fork) and run again." % text.count(OLD_COND))
+    text = text.replace(OLD_COND, NEW_COND)
+    print("accent fix: existing block made switchable (ESPEAK_FA_ENGLISH)")
+    return add_accent_helper(text)
 
 
 def apply_emoji(text):
@@ -411,6 +468,127 @@ def patch_android_emoji_setting():
         print("Android emoji setting: already patched")
         return
     print("Android emoji setting: patched OK (radio list \"Emoji in Persian text\": all / flags only / off)")
+
+# ---------------------------------------------------------------- Android: accent of English words
+
+ACCENT_PREF_KEY = "espeak_english_accent"
+
+ACC_STR_EN = """\
+  <string name="setting_english_accent">English words in Persian text</string>
+  <string name="english_accent_us">American accent (US)</string>
+  <string name="english_accent_uk">British accent (UK)</string>
+"""
+ACC_STR_FA = """\
+  <string name="setting_english_accent">کلمه‌های انگلیسی در متن فارسی</string>
+  <string name="english_accent_us">لهجه‌ی آمریکایی (US)</string>
+  <string name="english_accent_uk">لهجه‌ی بریتانیایی (UK)</string>
+"""
+
+ACC_PREF_METHOD = """\
+    /** Accent of English words in Persian text: us / uk (read by libespeak-ng through ESPEAK_FA_ENGLISH). */
+    private static Preference createEnglishAccentPreference(Context context) {
+        final ListPreference pref = new ListPreference(context);
+        pref.setTitle(R.string.setting_english_accent);
+        pref.setDialogTitle(R.string.setting_english_accent);
+        pref.setKey(VoiceSettings.PREF_ENGLISH_ACCENT);
+        final CharSequence[] entries = new CharSequence[] {
+                context.getString(R.string.english_accent_us),
+                context.getString(R.string.english_accent_uk)
+        };
+        final CharSequence[] values = new CharSequence[] { "us", "uk" };
+        pref.setEntries(entries);
+        pref.setEntryValues(values);
+        pref.setDefaultValue("us");
+        pref.setPersistent(true);
+        pref.setOnPreferenceChangeListener(mOnPreferenceChanged);
+
+        final SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(storageContext);
+        final String current = prefs.getString(VoiceSettings.PREF_ENGLISH_ACCENT, "us");
+        for (int i = 0; i < values.length; i++) {
+            if (values[i].equals(current)) {
+                pref.setSummary(entries[i]);
+            }
+        }
+        return pref;
+    }
+
+"""
+
+
+def patch_android_accent_setting():
+    """New list setting in the Android eSpeak app (American / British); TtsService hands it to the native code."""
+    res_en = ANDROID / "res/values/strings.xml"
+    settings_java = ANDROID / "src/com/reecedunn/espeak/TtsSettingsActivity.java"
+    voice_java = ANDROID / "src/com/reecedunn/espeak/VoiceSettings.java"
+    service_java = ANDROID / "src/com/reecedunn/espeak/TtsService.java"
+    for f in (res_en, settings_java, voice_java, service_java):
+        if not f.exists():
+            print("Android accent setting: %s not found -- skipped (no Android app in this tree)" % f)
+            return
+
+    changed = False
+    for path, block in ((res_en, ACC_STR_EN), (ANDROID / "res/values-fa/strings.xml", ACC_STR_FA)):
+        if not path.exists():
+            if path is res_en:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(("<?xml version='1.0' encoding='UTF-8'?>\n<resources>\n" + block + "</resources>\n").encode("utf-8"))
+            changed = True
+            continue
+        t, crlf = _read(path)
+        if 'name="setting_english_accent"' in t:
+            continue
+        t = _replace_once(t, "</resources>", block + "</resources>", "</resources> in " + str(path))
+        _write(path, t, crlf)
+        changed = True
+
+    t, crlf = _read(voice_java)
+    if "PREF_ENGLISH_ACCENT" not in t:
+        anchor = 'public static final String PREF_UNICODE_NORMALIZATION = "espeak_unicode_normalization";\n'
+        t = _replace_once(t, anchor, anchor + '    public static final String PREF_ENGLISH_ACCENT = "%s";\n' % ACCENT_PREF_KEY,
+                          "PREF_UNICODE_NORMALIZATION in VoiceSettings.java")
+        end = t.rstrip().rfind("}")
+        if end < 0:
+            fail("Android accent setting: VoiceSettings.java has no closing brace")
+        getter = (
+            "\n    /** Accent of English words in Persian text: \"us\" (default) or \"uk\". */\n"
+            "    public String getEnglishAccent() {\n"
+            "        final String accent = mPreferences.getString(PREF_ENGLISH_ACCENT, \"us\");\n"
+            "        return \"uk\".equals(accent) ? \"uk\" : \"us\";\n"
+            "    }\n"
+        )
+        t = t[:end].rstrip() + "\n" + getter + "}\n"
+        _write(voice_java, t, crlf)
+        changed = True
+
+    t, crlf = _read(settings_java)
+    if "createEnglishAccentPreference" not in t:
+        m_anchor = "    private static Preference createUnicodeNormalizationPreference(Context context) {\n"
+        t = _replace_once(t, m_anchor, ACC_PREF_METHOD + m_anchor, "createUnicodeNormalizationPreference")
+        add = "        group.addPreference(createUnicodeNormalizationPreference(context));\n"
+        t = _replace_once(t, add, add + "        group.addPreference(createEnglishAccentPreference(context));\n",
+                          "the Unicode normalization addPreference line")
+        _write(settings_java, t, crlf)
+        changed = True
+
+    t, crlf = _read(service_java)
+    if "ESPEAK_FA_ENGLISH" not in t:
+        anchor = "        final VoiceSettings settings = new VoiceSettings(PreferenceManager.getDefaultSharedPreferences(storageContext), mEngine);\n"
+        hook = (
+            "\n        // Accent of English words in Persian text reaches libespeak-ng through the environment (see translate.c)\n"
+            "        try {\n"
+            "            android.system.Os.setenv(\"ESPEAK_FA_ENGLISH\", settings.getEnglishAccent(), true);\n"
+            "        } catch (Throwable ignored) {\n"
+            "        }\n"
+        )
+        t = _replace_once(t, anchor, anchor + hook, "the VoiceSettings line in TtsService.java")
+        _write(service_java, t, crlf)
+        changed = True
+    if not changed:
+        print("Android accent setting: already patched")
+        return
+    print("Android accent setting: patched OK (list \"English words in Persian text\": American / British)")
+
 
 
 if __name__ == "__main__":
